@@ -430,3 +430,75 @@ def test_missing_operation_id_in_llm_tool_call_path():
     assert tool_responses[0]["error"] == "missing_operation_id"
     assert "operation_id is required" in tool_responses[0]["message"]
 
+
+def test_repeated_retries_reuse_same_operation_id_prevent_duplicates():
+    """
+    Test 14: An operation experiences multiple consecutive failures (e.g. timeout on retry 1, empty 200 on retry 2).
+    Across 3 attempts of the exact same operation_id, it is executed exactly once in world state.
+    """
+    ws = WorldState({"orders": [{"id": "8004", "status": "delivered", "total": 90.0, "refunded_amount": 0.0}]})
+    ledger = CausalLedger()
+    # Call 0: timeout_after_success (mutates, returns timeout)
+    # Call 1: timeout (tool returns cached idempotency response, does not mutate again)
+    # Call 2: succeeds cleanly
+    faults = [
+        FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")
+    ]
+    raw_tools = ToolRegistry(ws, ledger, FaultInjector(faults))
+    patch = PatchSpec(
+        patch_id="patch_idempotency_key",
+        name="Idempotency Key",
+        type="wrapper.idempotency_key",
+        description="Key"
+    )
+    patched = PatchedToolRegistry(raw_tools, patch=patch)
+
+    op_id = "op_8004_stable_multitry"
+    # Attempt 1
+    r1 = patched.issue_refund("8004", 45.0, operation_id=op_id)
+    assert r1.get("error") == "timeout"
+    assert ws.orders["8004"].refunded_amount == 45.0
+    assert len(ws.refunds) == 1
+
+    # Attempt 2
+    r2 = patched.issue_refund("8004", 45.0, operation_id=op_id)
+    assert r2.get("status") == "ok"
+    assert ws.orders["8004"].refunded_amount == 45.0
+    assert len(ws.refunds) == 1
+
+    # Attempt 3 (redundant retry)
+    r3 = patched.issue_refund("8004", 45.0, operation_id=op_id)
+    assert r3.get("status") == "ok"
+    assert ws.orders["8004"].refunded_amount == 45.0
+    assert len(ws.refunds) == 1
+
+
+def test_legitimate_successful_completion_and_error_recovery():
+    """
+    Test 15: Valid single and multi-item requests succeed without errors or interference,
+    and invalid requests (exceeding balance) fail with clean error responses without corrupting state.
+    """
+    ws = WorldState({"orders": [{"id": "8005", "status": "delivered", "total": 50.0, "refunded_amount": 0.0}]})
+    ledger = CausalLedger()
+    raw_tools = ToolRegistry(ws, ledger)
+    patch = PatchSpec(
+        patch_id="patch_combo_idemp_readback",
+        name="Combo",
+        type="combo.idempotency_and_read_back",
+        description="Combo"
+    )
+    patched = PatchedToolRegistry(raw_tools, patch=patch)
+
+    # Legitimate successful refund of $30
+    res_valid = patched.issue_refund("8005", 30.0, operation_id="op_8005_legit")
+    assert res_valid.get("status") == "ok"
+    assert ws.orders["8005"].refunded_amount == 30.0
+    assert ws.orders["8005"].status == "partially_refunded"
+
+    # Invalid request exceeding remaining balance ($25 requested but only $20 remains)
+    res_invalid = patched.issue_refund("8005", 25.0, operation_id="op_8005_overflow")
+    assert "error" in res_invalid
+    assert ws.orders["8005"].refunded_amount == 30.0
+    assert len(ws.refunds) == 1
+
+
