@@ -23,13 +23,46 @@ class PatchedToolRegistry:
     def __init__(self, raw_registry: ToolRegistry, patch: Optional[PatchSpec] = None):
         self.raw = raw_registry
         self.patch = patch
-        self._action_call_history: Dict[str, int] = {}
+        # Maps (order_id, logical_op_index) -> stable idempotency key
+        self._op_key_map: Dict[str, str] = {}
+        # Records initial refund state per order before any mutations in this session
+        self._initial_refund_ids: Dict[str, set] = {}
         self._order_refunded_keys: set = set()
 
     def get_order(self, order_id: str) -> Dict[str, Any]:
         return self.raw.get_order(order_id)
 
-    def issue_refund(self, order_id: str, amount: float, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+    def _get_stable_op_key(self, order_id: str, amount: float, op_index: Optional[int] = None) -> str:
+        """
+        Generates or retrieves one stable operation key per logical refund request.
+        Separate logical operations on the same order get distinct stable keys.
+        """
+        key_id = f"{order_id}_{amount}" if op_index is None else f"{order_id}_{amount}_{op_index}"
+        if key_id not in self._op_key_map:
+            self._op_key_map[key_id] = f"idem_{order_id}_{int(amount*100)}_{len(self._op_key_map)}"
+        return self._op_key_map[key_id]
+
+    def _verify_specific_refund(self, order_id: str, amount: float, stable_key: str, initial_refund_ids: set) -> Optional[Dict[str, Any]]:
+        """
+        Verifies the specific refund operation through:
+        1. A matching idempotency key on a newly created refund record, OR
+        2. A newly created refund record (absent from initial state) with matching order_id and exact amount.
+        Never infers success from cumulative refunded_amount >= requested amount.
+        """
+        current_refunds = self.raw.world_state.refunds.values()
+        # 1. Check by stable idempotency key
+        for r in current_refunds:
+            if r.order_id == str(order_id) and r.idempotency_key == stable_key:
+                return {"status": "ok", "refund_id": r.id, "amount": r.amount, "order_id": order_id, "verified_by_readback": True}
+        
+        # 2. Check for newly created refund since this operation began
+        for r in current_refunds:
+            if r.order_id == str(order_id) and r.id not in initial_refund_ids and abs(r.amount - amount) < 0.001:
+                return {"status": "ok", "refund_id": r.id, "amount": r.amount, "order_id": order_id, "verified_by_readback": True}
+
+        return None
+
+    def issue_refund(self, order_id: str, amount: float, idempotency_key: Optional[str] = None, op_index: Optional[int] = None) -> Dict[str, Any]:
         if not self.patch:
             return self.raw.issue_refund(order_id, amount, idempotency_key)
 
@@ -37,7 +70,6 @@ class PatchedToolRegistry:
 
         # 1. Control: refuse_all
         if p_type == "control.refuse_all":
-            # Negative control: never issues refunds
             self.raw.ledger.record_tool_request("issue_refund", {"order_id": order_id, "amount": amount, "control": "refuse_all"})
             res = {"status": "error", "message": "Policy refusal: all refund requests blocked"}
             self.raw.ledger.record_tool_response(res)
@@ -45,7 +77,6 @@ class PatchedToolRegistry:
 
         # 2. Control: blind_dedupe
         if p_type == "control.blind_dedupe":
-            # Suppresses any repeat issue_refund call on an order regardless of items or amount
             if order_id in self._order_refunded_keys:
                 self.raw.ledger.record_tool_request("issue_refund", {"order_id": order_id, "amount": amount, "control": "blind_dedupe"})
                 res = {"status": "ok", "message": "Deduplicated repeat call on order"}
@@ -54,45 +85,47 @@ class PatchedToolRegistry:
             self._order_refunded_keys.add(order_id)
             return self.raw.issue_refund(order_id, amount, idempotency_key)
 
-        # 3. Wrapper: idempotency_key
-        if p_type in ("wrapper.idempotency_key", "combo.idempotency_and_read_back"):
-            # Generates a deterministic key per (order, action, amount, item_index)
-            call_idx = self._action_call_history.get(order_id, 0)
-            self._action_call_history[order_id] = call_idx + 1
-            generated_key = f"idemp_{order_id}_{amount}_{call_idx}"
-            key_to_use = idempotency_key or generated_key
+        # Snapshot initial refund IDs for this order before call
+        existing_refund_ids = {r.id for r in self.raw.world_state.refunds.values() if r.order_id == str(order_id)}
+        stable_key = idempotency_key or self._get_stable_op_key(order_id, amount, op_index)
 
-            resp = self.raw.issue_refund(order_id, amount, idempotency_key=key_to_use)
-            
-            # If combo, also read-back verify
-            if p_type == "combo.idempotency_and_read_back":
-                if "error" in resp and resp.get("error") == "timeout":
-                    # Read back order to verify if it actually succeeded
-                    order_check = self.raw.world_state.orders.get(str(order_id))
-                    if order_check and order_check.refunded_amount >= amount:
-                        # Mutation actually succeeded! Return normalized success
-                        resp = {"status": "ok", "refund_id": f"verified_{order_id}", "amount": amount, "verified_by_readback": True}
-            return resp
+        # 3. Wrapper: idempotency_key
+        if p_type == "wrapper.idempotency_key":
+            return self.raw.issue_refund(order_id, amount, idempotency_key=stable_key)
 
         # 4. Wrapper: read_back_verify
         if p_type == "wrapper.read_back_verify":
-            resp = self.raw.issue_refund(order_id, amount, idempotency_key)
-            if "error" in resp and resp.get("error") == "timeout":
-                # Check ground truth order state
-                order_check = self.raw.world_state.orders.get(str(order_id))
-                if order_check and order_check.refunded_amount >= amount:
-                    resp = {"status": "ok", "refund_id": f"verified_{order_id}", "amount": amount, "verified_by_readback": True}
+            resp = self.raw.issue_refund(order_id, amount, idempotency_key=idempotency_key)
+            # Handle timeout or empty response (200 with empty body)
+            is_unclear = ("error" in resp and resp.get("error") == "timeout") or (resp.get("status") == 200 and resp.get("data") is None)
+            if is_unclear:
+                verified = self._verify_specific_refund(order_id, amount, stable_key, existing_refund_ids)
+                if verified:
+                    return verified
+                # Specific effect was NOT applied - return honest failure/timeout to agent
+                return {"status": "error", "error": "timeout", "verified_by_readback": False, "effect_applied": False}
             return resp
 
         # 5. Wrapper: retry_policy
         if p_type == "wrapper.retry_policy":
-            resp = self.raw.issue_refund(order_id, amount, idempotency_key)
-            if "error" in resp and resp.get("error") == "timeout":
-                # Check order state before allowing any retry
-                order_check = self.raw.world_state.orders.get(str(order_id))
-                if order_check and order_check.refunded_amount > 0:
-                    # Already mutated, don't retry blindly
-                    resp = {"status": "ok", "message": "State check confirmed refund completed despite timeout"}
+            resp = self.raw.issue_refund(order_id, amount, idempotency_key=idempotency_key)
+            is_unclear = ("error" in resp and resp.get("error") == "timeout") or (resp.get("status") == 200 and resp.get("data") is None)
+            if is_unclear:
+                verified = self._verify_specific_refund(order_id, amount, stable_key, existing_refund_ids)
+                if verified:
+                    return verified
+                return {"status": "error", "error": "timeout", "verified_by_readback": False, "effect_applied": False}
+            return resp
+
+        # 6. Combo: idempotency_key + read_back_verify
+        if p_type == "combo.idempotency_and_read_back":
+            resp = self.raw.issue_refund(order_id, amount, idempotency_key=stable_key)
+            is_unclear = ("error" in resp and resp.get("error") == "timeout") or (resp.get("status") == 200 and resp.get("data") is None)
+            if is_unclear:
+                verified = self._verify_specific_refund(order_id, amount, stable_key, existing_refund_ids)
+                if verified:
+                    return verified
+                return {"status": "error", "error": "timeout", "verified_by_readback": False, "effect_applied": False}
             return resp
 
         return self.raw.issue_refund(order_id, amount, idempotency_key)

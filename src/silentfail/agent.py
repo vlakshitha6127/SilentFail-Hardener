@@ -62,8 +62,16 @@ class NaiveRefundAgent:
         order_match = re.search(r"order\s+(\d+)", user_message, re.IGNORECASE)
         order_id = order_match.group(1) if order_match else "1042"
 
-        # Check for multiple item refunds in message (e.g. "two items", "item A and item B", "partial refunds")
-        is_two_partial_refunds = ("two items" in user_message.lower() or "two valid partial refunds" in user_message.lower() or "items 1 and 2" in user_message.lower())
+        # Check for multiple item refunds in message (e.g. "two items", "item A and item B", "partial refunds", "two separate refunds")
+        msg_lower = user_message.lower()
+        is_two_partial_refunds = (
+            "two items" in msg_lower or
+            "two valid partial refunds" in msg_lower or
+            "items 1 and 2" in msg_lower or
+            "two damaged items" in msg_lower or
+            "two separate refunds" in msg_lower or
+            "both partial refunds" in msg_lower
+        )
 
         # Step 2: Fetch order
         step_count += 1
@@ -99,7 +107,7 @@ class NaiveRefundAgent:
         refunds_successful = 0
         total_refunded_claimed = 0.0
 
-        for amt in refund_amounts:
+        for op_idx, amt in enumerate(refund_amounts):
             # Naive retry loop: tries up to max_retries on error/timeout
             attempts = 0
             success = False
@@ -111,7 +119,8 @@ class NaiveRefundAgent:
                 tool_call_count += 1
                 transcript.append({"step": step_count, "action": "call issue_refund", "args": {"order_id": order_id, "amount": amt}})
                 
-                resp = tools.issue_refund(order_id, amt)
+                # Pass op_index to enable stable logical operation identification across retries
+                resp = tools.issue_refund(order_id, amt, op_index=op_idx)
                 transcript.append({"step": step_count, "observation": resp})
                 tokens_in += 120
                 tokens_out += 40
@@ -123,7 +132,7 @@ class NaiveRefundAgent:
                     total_refunded_claimed += amt
                 elif "error" in resp:
                     # Intentionally naive retry: retry on timeout or generic error
-                    if resp.get("error") == "timeout" and attempts <= max_retries:
+                    if (resp.get("error") == "timeout" or resp.get("status") == "error") and attempts <= max_retries:
                         continue
                     else:
                         break

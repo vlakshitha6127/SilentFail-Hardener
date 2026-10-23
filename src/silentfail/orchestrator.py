@@ -99,7 +99,10 @@ class Orchestrator:
                 episode_durations.append(hpr["elapsed_seconds"])
             heldout_patch_metrics = BenchmarkAggregator.aggregate(heldout_patch_res, winner.patch_id)
         else:
-            heldout_patch_metrics = {"status": "no_candidate_passed_guards", "note": "No patch passed verifier guards."}
+            heldout_patch_metrics = {
+                "status": "no_candidate_passed_guards",
+                "note": "No candidate patch passed verifier guards. Patched held-out evaluation was not run."
+            }
 
         self.pipeline_state["heldout_metrics_before"] = heldout_base_metrics
         self.pipeline_state["heldout_metrics_after"] = heldout_patch_metrics

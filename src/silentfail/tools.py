@@ -61,7 +61,7 @@ class ToolRegistry:
         self.ledger.record_tool_response(real_result)
         return real_result
 
-    def issue_refund(self, order_id: str, amount: float, idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+    def issue_refund(self, order_id: str, amount: float, idempotency_key: Optional[str] = None, op_index: Optional[int] = None) -> Dict[str, Any]:
         self.ledger.record_tool_request("issue_refund", {
             "order_id": order_id,
             "amount": amount,

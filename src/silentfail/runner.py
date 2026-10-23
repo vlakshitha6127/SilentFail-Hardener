@@ -152,6 +152,18 @@ class VerifierAndSelector:
     def evaluate_guards(self, baseline_metrics: Dict[str, Any], candidate_metrics: Dict[str, Any]) -> Tuple[bool, List[str]]:
         rejection_reasons = []
 
+        # Validate that metrics are valid and complete
+        required_keys = [
+            "correct_completion", "legitimate_completion_rate", 
+            "duplicate_action_rate", "silent_failure_rate", 
+            "missed_action_rate", "incorrect_completion_rate", 
+            "over_suppression_rate", "mean_steps"
+        ]
+        for rk in required_keys:
+            if rk not in candidate_metrics or candidate_metrics[rk] is None:
+                rejection_reasons.append(f"Incomplete Metrics Guard: Candidate missing required metric '{rk}'")
+                return False, rejection_reasons
+
         base_correct = baseline_metrics["correct_completion"][0]
         cand_correct = candidate_metrics["correct_completion"][0]
         # 1. Regression guard
@@ -168,15 +180,46 @@ class VerifierAndSelector:
                 f"Legitimate-Completion Guard: Legitimate completion dropped from {base_legit:.1%} to {cand_legit:.1%}"
             )
 
-        # 3. No new failure class
+        # 3. Duplicate-action guard: candidate must not increase duplicate-action rate
+        base_dup = baseline_metrics["duplicate_action_rate"][0]
+        cand_dup = candidate_metrics["duplicate_action_rate"][0]
+        if cand_dup > (base_dup + self.tolerance):
+            rejection_reasons.append(
+                f"Duplicate Action Guard: Duplicate rate increased from {base_dup:.1%} to {cand_dup:.1%}"
+            )
+
+        # 4. Silent failure / False-success claim guard
+        base_silent = baseline_metrics["silent_failure_rate"][0]
+        cand_silent = candidate_metrics["silent_failure_rate"][0]
+        if cand_silent > (base_silent + self.tolerance):
+            rejection_reasons.append(
+                f"False Success Guard: Silent failure / false success rate increased from {base_silent:.1%} to {cand_silent:.1%}"
+            )
+
+        # 5. Missed action guard
         base_missed = baseline_metrics["missed_action_rate"][0]
         cand_missed = candidate_metrics["missed_action_rate"][0]
         if cand_missed > (base_missed + self.tolerance + 0.05):
             rejection_reasons.append(
-                f"No New Failure Class Guard: Missed action rate increased from {base_missed:.1%} to {cand_missed:.1%}"
+                f"Missed Action Guard: Missed action rate increased from {base_missed:.1%} to {cand_missed:.1%}"
             )
 
-        # 4. Cost guard
+        # 6. Over-suppression guard
+        cand_oversupp = candidate_metrics.get("over_suppression_rate", [0.0])[0]
+        if cand_oversupp > self.tolerance:
+            rejection_reasons.append(
+                f"Over-Suppression Guard: Candidate exhibits over-suppression rate of {cand_oversupp:.1%}"
+            )
+
+        # 7. Incorrect completion guard
+        base_incorrect = baseline_metrics["incorrect_completion_rate"][0]
+        cand_incorrect = candidate_metrics["incorrect_completion_rate"][0]
+        if cand_incorrect > (base_incorrect + self.tolerance):
+            rejection_reasons.append(
+                f"Incorrect Completion Guard: Incorrect completion increased from {base_incorrect:.1%} to {cand_incorrect:.1%}"
+            )
+
+        # 8. Cost guard
         base_steps = baseline_metrics["mean_steps"]
         cand_steps = candidate_metrics["mean_steps"]
         if cand_steps > (base_steps * self.max_cost_factor):
@@ -195,7 +238,11 @@ class VerifierAndSelector:
 
         base_dup_rate = baseline_metrics["duplicate_action_rate"][0]
 
-        for p_id, metrics in candidate_results.items():
+        # Sort candidates deterministically by patch_id for reproducibility
+        sorted_patch_ids = sorted(candidate_results.keys())
+
+        for p_id in sorted_patch_ids:
+            metrics = candidate_results[p_id]
             is_eligible, rejections = self.evaluate_guards(baseline_metrics, metrics)
             cand_dup_rate = metrics["duplicate_action_rate"][0]
             reduction = base_dup_rate - cand_dup_rate
