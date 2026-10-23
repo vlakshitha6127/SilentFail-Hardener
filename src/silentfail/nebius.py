@@ -40,16 +40,18 @@ class NebiusClient:
     def probe_gate_g0(self) -> Dict[str, Any]:
         """
         Gate G0 check (Section 16):
-        Measures Nemotron throughput and verifies connectivity.
-        Returns metrics dict with status and measured throughput.
+        Measures Nemotron throughput and verifies connectivity if real credentials exist.
+        Never fabricates latency or throughput on local simulation fallback.
         """
         if not self.is_live or not self.client:
             return {
-                "status": "fallback",
-                "reason": "NEBIUS_API_KEY not configured or offline. Running on certified deterministic local runner.",
+                "status": "local_simulation",
+                "connected": False,
+                "reason": "NEBIUS_API_KEY not configured or offline. Running on local simulation engine.",
                 "endpoint": self.base_url,
-                "measured_rps": 500.0,
-                "latency_ms": 1.2
+                "measured_rps": None,
+                "latency_ms": None,
+                "note": "Local deterministic simulation mode; remote Nebius call was not performed."
             }
 
         t0 = time.time()
@@ -63,6 +65,7 @@ class NebiusClient:
             elapsed = time.time() - t0
             return {
                 "status": "connected",
+                "connected": True,
                 "model": self.nano_model,
                 "latency_ms": round(elapsed * 1000, 2),
                 "measured_rps": round(1.0 / max(0.001, elapsed), 2),
@@ -70,11 +73,13 @@ class NebiusClient:
             }
         except Exception as e:
             return {
-                "status": "fallback",
-                "reason": f"Remote endpoint check failed: {str(e)}. Operating with certified deterministic local execution.",
+                "status": "local_simulation",
+                "connected": False,
+                "reason": f"Remote Nebius endpoint error: {str(e)}. Operating in local simulation mode.",
                 "endpoint": self.base_url,
-                "measured_rps": 500.0,
-                "latency_ms": 1.2
+                "measured_rps": None,
+                "latency_ms": None,
+                "note": "Local deterministic simulation mode; remote Nebius call failed."
             }
 
     def diagnose_and_propose_patches(self, failing_ledgers: List[Dict[str, Any]]) -> List[PatchSpec]:

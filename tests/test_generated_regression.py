@@ -10,7 +10,7 @@ from src.silentfail.runner import EpisodeRunner
 
 WINNING_PATCH = PatchSpec(
     patch_id="patch_retry_policy",
-    name="Certified Hardened Wrapper",
+    name="State-Checked Retry Policy Wrapper",
     type="wrapper.retry_policy",
     description="Auto-selected patch passing all 4 regression and legitimate-completion guards."
 )

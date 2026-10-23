@@ -58,9 +58,11 @@ class Orchestrator:
 
         # Step 2: Baseline Sweep on Train Scenarios
         baseline_results = []
+        episode_durations: List[float] = []
         for sc in train_scenarios:
             res = EpisodeRunner.run_episode(sc)
             baseline_results.append(res)
+            episode_durations.append(res["elapsed_seconds"])
             if not res["is_correct"] and not self.pipeline_state["sample_failing_record"]:
                 self.pipeline_state["sample_failing_record"] = res["record"].model_dump()
 
@@ -75,6 +77,8 @@ class Orchestrator:
         candidate_metrics: Dict[str, Dict[str, Any]] = {}
         for cand in candidates:
             cand_results = [EpisodeRunner.run_episode(sc, patch=cand) for sc in train_scenarios]
+            for cr in cand_results:
+                episode_durations.append(cr["elapsed_seconds"])
             candidate_metrics[cand.patch_id] = BenchmarkAggregator.aggregate(cand_results, cand.patch_id)
 
         # Step 5: Selection rule with 4 guards
@@ -84,32 +88,41 @@ class Orchestrator:
 
         # Step 6: Held-out validation
         heldout_base_res = [EpisodeRunner.run_episode(sc) for sc in held_out_scenarios]
+        for hbr in heldout_base_res:
+            episode_durations.append(hbr["elapsed_seconds"])
         heldout_base_metrics = BenchmarkAggregator.aggregate(heldout_base_res, "baseline_heldout")
         
-        heldout_patch_res = [EpisodeRunner.run_episode(sc, patch=winner) for sc in held_out_scenarios]
-        heldout_patch_metrics = BenchmarkAggregator.aggregate(heldout_patch_res, winner.patch_id if winner else "none")
+        heldout_patch_res = []
+        if winner:
+            heldout_patch_res = [EpisodeRunner.run_episode(sc, patch=winner) for sc in held_out_scenarios]
+            for hpr in heldout_patch_res:
+                episode_durations.append(hpr["elapsed_seconds"])
+            heldout_patch_metrics = BenchmarkAggregator.aggregate(heldout_patch_res, winner.patch_id)
+        else:
+            heldout_patch_metrics = {"status": "no_candidate_passed_guards", "note": "No patch passed verifier guards."}
 
         self.pipeline_state["heldout_metrics_before"] = heldout_base_metrics
         self.pipeline_state["heldout_metrics_after"] = heldout_patch_metrics
 
         # Step 7: Scale and Cost metrics table (Section 9.1)
-        total_episodes = len(train_scenarios) + (len(candidates) * len(train_scenarios)) + (2 * len(held_out_scenarios))
-        median_sec = 0.012  # measured local median episode time (or ~1.2s on live remote inference)
-        serial_wall_clock = total_episodes * median_sec
-        actual_parallel_clock = max(0.25, time.time() - t0_total)
-        speedup = round(serial_wall_clock / actual_parallel_clock, 2)
+        # Measured timing over all actually executed episodes
+        total_episodes_executed = len(episode_durations)
+        actual_total_elapsed = max(0.0001, time.time() - t0_total)
+        median_sec = sorted(episode_durations)[len(episode_durations) // 2] if episode_durations else 0.0
+
+        is_cloud_exec = self.nebius_client.is_live and g0_res.get("connected", False)
 
         self.pipeline_state["scale_and_cost"] = {
+            "mode": "nebius_cloud" if is_cloud_exec else "local_simulation",
             "scenarios_train": train_count,
             "scenarios_heldout": held_out_count,
             "candidates_verified": len(candidates),
             "verification_runs": len(candidates) * train_count,
-            "total_episodes_evaluated": total_episodes,
-            "median_seconds_per_run": median_sec,
-            "serial_wall_clock_estimate_sec": round(serial_wall_clock, 2),
-            "actual_parallel_wall_clock_sec": round(actual_parallel_clock, 2),
-            "speedup_factor": speedup,
-            "total_tokens": base_metrics.get("mean_tokens", 0) * total_episodes
+            "total_episodes_evaluated": total_episodes_executed,
+            "median_seconds_per_episode": round(median_sec, 6),
+            "measured_wall_clock_sec": round(actual_total_elapsed, 4),
+            "speedup_factor": None if not is_cloud_exec else round(sum(episode_durations) / actual_total_elapsed, 2),
+            "note": "Measured in local deterministic simulation mode." if not is_cloud_exec else "Measured on remote Nebius endpoint."
         }
 
         # Step 8: Generate Runnable Pytest Regression Test
@@ -126,8 +139,15 @@ class Orchestrator:
         return self.pipeline_state
 
     def generate_regression_test_file(self, winner: Optional[PatchSpec]) -> str:
-        winner_id = winner.patch_id if winner else "patch_combo_idemp_readback"
-        winner_type = winner.type if winner else "combo.idempotency_and_read_back"
+        if not winner:
+            return '''"""
+SilentFail Verification Notice: No candidate patch passed all 4 verifier guards.
+No regression test emitted because no safe patch was selected.
+"""
+'''
+        winner_id = winner.patch_id
+        winner_type = winner.type
+        winner_name = winner.name
         
         test_code = f'''"""
 Auto-generated SilentFail Regression Test.
@@ -141,7 +161,7 @@ from src.silentfail.runner import EpisodeRunner
 
 WINNING_PATCH = PatchSpec(
     patch_id="{winner_id}",
-    name="Certified Hardened Wrapper",
+    name="{winner_name}",
     type="{winner_type}",
     description="Auto-selected patch passing all 4 regression and legitimate-completion guards."
 )
