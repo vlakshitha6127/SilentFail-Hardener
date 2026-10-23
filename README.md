@@ -99,25 +99,36 @@ Open [http://localhost:8000](http://localhost:8000) in your browser:
 > [!NOTE]
 > **Execution Mode**: **Deterministic Local Simulation** (Remote Nebius endpoint was not queried during this run).  
 > **Dataset**: 50 Training Scenarios (300 verification episodes across 6 candidates) + 30 Held-Out Validation Scenarios under the published 9-category fault distribution.  
-> **Winning Patch Selected**: `patch_retry_policy` (State-Checked Retry Policy Wrapper passing all 8 active verifier guards).
+> **Winning Patch Selected**: `patch_retry_policy` (State-Checked Retry Policy Wrapper passing all implemented verifier guards).
 
-### Baseline vs Hardened Performance (Held-Out Evaluation)
+### Baseline vs Hardened Performance (Paired Held-Out Evaluation on Same 30 Scenarios)
 
-| Metric | Baseline (Naive Agent) | Hardened (`patch_retry_policy`) | Delta / Verifier Guard Outcome |
+| Metric | Held-Out Baseline (Naive Agent) | Held-Out Hardened (`patch_retry_policy`) | Delta / Verifier Guard Outcome |
 |---|---|---|---|
-| **Duplicate-Action Rate** | **10.0%** [3.5% - 25.6%] | **0.0%** [0.0% - 11.4%] | **-100% (Duplicate refunds fully eliminated)** |
-| **Correct Completion Rate** | 26.0% [15.9% - 39.6%] | **46.7%** [30.2% - 63.9%] | **+20.7% (Regression Guard passed)** |
-| **Legitimate Completion Rate** | 64.3% [38.8% - 83.7%] | **77.8%** [45.3% - 93.7%] | **Maintained (Over-Suppression Guard passed)** |
-| **Conditional False Success** | **86.5%** [72.0% - 94.1%] | **0.0%** | **False claims suppressed** |
-| **Mean Execution Steps** | 3.26 steps | 3.26 steps | **Compliant (Cost Guard passed)** |
+| **Duplicate-Action Rate** | **10.0%** (3/30) [3.5% - 25.6%] | **0.0%** (0/30) [0.0% - 11.4%] | **-100% (Duplicate refunds fully eliminated)** |
+| **Silent Failure / False Success** | **16.7%** (5/30) [7.3% - 33.6%] | **0.0%** (0/30) [0.0% - 11.4%] | **-100% (Silent failures eliminated)** |
+| **Correct Completion Rate** | **46.7%** (14/30) [30.2% - 63.9%] | **46.7%** (14/30) [30.2% - 63.9%] | **Maintained (Regression Guard passed)** |
+| **Legitimate Completion Rate** | **77.8%** (7/9) [45.3% - 93.7%] | **77.8%** (7/9) [45.3% - 93.7%] | **Maintained (Over-Suppression Guard passed)** |
+| **Mean Execution Steps** | 2.93 steps | 2.90 steps | **Cost Guard Compliant** |
+
+### Implemented Verifier Guards
+The verifier deterministically evaluates candidates using implemented check routines:
+1. **Incomplete/Missing Metrics Guard**: Rejects malformed metrics before candidate evaluation.
+2. **Regression Guard**: Protects against drops in baseline task completion rate beyond tolerance.
+3. **Legitimate-Completion Guard**: Protects valid multi-item/partial refunds and no-fault actions.
+4. **Duplicate-Action Guard**: Enforces non-increasing duplicate refund rates.
+5. **False-Success Claim Guard**: Enforces non-increasing silent failure claims.
+6. **Missed-Action Guard**: Caps omission rate increases.
+7. **Over-Suppression Guard**: Rejects candidates that block legitimate operations.
+8. **Cost Guard**: Caps mean execution steps within the configured factor of baseline.
 
 ### Verifier Guard Rejections Recorded
 - `control_refuse_all`: **REJECTED** by Regression Guard (dropped completion) and Legitimate-Completion Guard.
-- `control_blind_dedupe`: **REJECTED** by Legitimate-Completion Guard and Over-Suppression Guard (broke legitimate multi-item refunds).
+- `control_blind_dedupe`: **REJECTED** by Legitimate-Completion Guard and Over-Suppression Guard (suppressed legitimate repeated partial refunds).
 
 To reproduce this benchmark run:
 ```bash
-python -c "from src.silentfail.orchestrator import Orchestrator; Orchestrator().run_full_pipeline(50, 30)"
+py -c "from src.silentfail.orchestrator import Orchestrator; Orchestrator().run_full_pipeline(50, 30)"
 ```
 
 ---

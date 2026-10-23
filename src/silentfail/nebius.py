@@ -15,7 +15,12 @@ import json
 import time
 from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel
-from openai import OpenAI
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
 from src.silentfail.models import PatchSpec
 
 

@@ -265,3 +265,66 @@ def test_guard_rejects_incomplete_metrics():
     is_eligible, reasons = verifier.evaluate_guards(baseline_metrics, incomplete_metrics)
     assert is_eligible is False
     assert any("Incomplete Metrics Guard" in r for r in reasons)
+
+
+def test_llm_tool_call_operation_identity_contract():
+    """
+    Test 9: LLM tool-calling path follows the documented operation-identity contract.
+    Retries that supply the same operation_id reuse the stable key.
+    Independent calls with different operation_ids receive distinct keys.
+    """
+    initial = {"orders": [{"id": "7001", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]}
+    ws = WorldState(initial)
+    ledger = CausalLedger()
+    raw_tools = ToolRegistry(ws, ledger)
+    patch = PatchSpec(
+        patch_id="patch_idempotency_key",
+        name="Idempotency Key",
+        type="wrapper.idempotency_key",
+        description="Key"
+    )
+    patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
+
+    # LLM issues first refund with explicit operation_id 'call_1'
+    res1 = patched_tools.issue_refund("7001", 20.0, operation_id="call_1")
+    assert res1.get("status") == "ok"
+    key1 = ws.refunds[res1["refund_id"]].idempotency_key
+
+    # LLM retries with identical operation_id 'call_1'
+    res1_retry = patched_tools.issue_refund("7001", 20.0, operation_id="call_1")
+    assert res1_retry.get("status") == "ok"
+    # Mutation must NOT duplicate
+    assert len(ws.refunds) == 1
+
+    # LLM issues independent second refund with different operation_id 'call_2'
+    res2 = patched_tools.issue_refund("7001", 20.0, operation_id="call_2")
+    assert res2.get("status") == "ok"
+    key2 = ws.refunds[res2["refund_id"]].idempotency_key
+
+    assert len(ws.refunds) == 2
+    assert key1 != key2
+
+
+def test_generated_regression_test_handles_winner_and_no_winner():
+    """
+    Test 10: Regression test generator uses actual selected winner,
+    and returns a clean notice without claiming a patch passed when winner is None.
+    """
+    from src.silentfail.orchestrator import Orchestrator
+    orch = Orchestrator()
+
+    # Case A: Real winner
+    winner = PatchSpec(
+        patch_id="patch_custom_winner",
+        name="Custom Hardened Wrapper",
+        type="wrapper.retry_policy",
+        description="A real verified patch"
+    )
+    code_with_winner = orch.generate_regression_test_file(winner)
+    assert 'patch_id="patch_custom_winner"' in code_with_winner
+    assert 'type="wrapper.retry_policy"' in code_with_winner
+
+    # Case B: No winner passed
+    code_no_winner = orch.generate_regression_test_file(None)
+    assert "No candidate patch passed all 4 verifier guards" in code_no_winner
+    assert "patch_id=" not in code_no_winner
