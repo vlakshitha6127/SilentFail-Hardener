@@ -1,0 +1,304 @@
+"""
+Agent Adapter and Reference Naive Refund Agent.
+Sections 5.1, 5.2 of the Project Spec.
+
+The reference agent handles customer refund requests.
+Intentionally naive: retries on errors/timeouts and trusts tool responses at face value.
+No code path may special-case a fault type.
+"""
+
+from typing import Dict, Any, List, Optional
+from dataclasses import dataclass
+from src.silentfail.tools import ToolRegistry
+from src.silentfail.models import ExecutionCost
+import re
+import json
+
+
+@dataclass
+class AgentResult:
+    final_message: str
+    transcript: List[Dict[str, Any]]
+    terminated: str  # 'completed' | 'max_steps' | 'error'
+    cost: ExecutionCost
+
+
+class NaiveRefundAgent:
+    """
+    Reference refund agent.
+    Can be run with an actual OpenAI-compatible LLM endpoint (Nebius Nemotron)
+    or with the deterministic reference loop that replicates genuine naive LLM tool calling.
+    """
+    def __init__(self, model_client: Optional[Any] = None, model_name: str = "nvidia/nemotron-mini-4b-instruct", max_retries: int = 2):
+        self.model_client = model_client
+        self.model_name = model_name
+        self.max_retries = max_retries
+
+    def run(self, user_message: str, tools: ToolRegistry, config: Optional[Dict[str, Any]] = None) -> AgentResult:
+        config = config or {}
+        max_retries = config.get("max_retries", self.max_retries)
+        
+        # If model_client is available and configured, call the live LLM endpoint
+        if self.model_client:
+            return self._run_llm(user_message, tools, config)
+        else:
+            return self._run_deterministic_naive(user_message, tools, max_retries)
+
+    def _run_deterministic_naive(self, user_message: str, tools: ToolRegistry, max_retries: int) -> AgentResult:
+        """
+        Deterministic naive agent logic implementing:
+        - parse order id and requested items or refund amount
+        - fetch order
+        - issue refund (with naive retry on error/timeout without read-back or idempotency keys)
+        - send email confirmation or refuse truthfully
+        """
+        transcript: List[Dict[str, Any]] = []
+        tokens_in = 150
+        tokens_out = 50
+        tool_call_count = 0
+        step_count = 0
+
+        # Step 1: Parse user intent naively
+        order_match = re.search(r"order\s+(\d+)", user_message, re.IGNORECASE)
+        order_id = order_match.group(1) if order_match else "1042"
+
+        # Check for multiple item refunds in message (e.g. "two items", "item A and item B", "partial refunds")
+        is_two_partial_refunds = ("two items" in user_message.lower() or "two valid partial refunds" in user_message.lower() or "items 1 and 2" in user_message.lower())
+
+        # Step 2: Fetch order
+        step_count += 1
+        tool_call_count += 1
+        transcript.append({"step": step_count, "action": "call get_order", "args": {"order_id": order_id}})
+        order_info = tools.get_order(order_id)
+        transcript.append({"step": step_count, "observation": order_info})
+        tokens_in += 100
+        tokens_out += 30
+
+        if "error" in order_info:
+            final_msg = f"Sorry, I could not find order {order_id}."
+            return AgentResult(final_message=final_msg, transcript=transcript, terminated="completed", cost=ExecutionCost(tokens_in=tokens_in, tokens_out=tokens_out, tool_calls=tool_call_count, steps=step_count))
+
+        total_amount = float(order_info.get("total", 0.0))
+        refunded = float(order_info.get("refunded_amount", 0.0))
+        remaining = round(total_amount - refunded, 2)
+
+        if remaining <= 0:
+            final_msg = f"Order {order_id} has already been fully refunded. No additional refund can be issued."
+            return AgentResult(final_message=final_msg, transcript=transcript, terminated="completed", cost=ExecutionCost(tokens_in=tokens_in, tokens_out=tokens_out, tool_calls=tool_call_count, steps=step_count))
+
+        # Determine refund amounts to issue
+        refund_amounts = []
+        if is_two_partial_refunds:
+            half = round(total_amount / 2, 2)
+            rem = round(total_amount - half, 2)
+            refund_amounts = [half, rem]
+        else:
+            # Naive single refund requests standard full or partial amount
+            refund_amounts = [round(total_amount / 2, 2) if total_amount >= 50 else total_amount]
+
+        refunds_successful = 0
+        total_refunded_claimed = 0.0
+
+        for amt in refund_amounts:
+            # Naive retry loop: tries up to max_retries on error/timeout
+            attempts = 0
+            success = False
+            last_resp = None
+            
+            while attempts <= max_retries and not success:
+                attempts += 1
+                step_count += 1
+                tool_call_count += 1
+                transcript.append({"step": step_count, "action": "call issue_refund", "args": {"order_id": order_id, "amount": amt}})
+                
+                resp = tools.issue_refund(order_id, amt)
+                transcript.append({"step": step_count, "observation": resp})
+                tokens_in += 120
+                tokens_out += 40
+                last_resp = resp
+
+                if resp.get("status") == "ok":
+                    success = True
+                    refunds_successful += 1
+                    total_refunded_claimed += amt
+                elif "error" in resp:
+                    # Intentionally naive retry: retry on timeout or generic error
+                    if resp.get("error") == "timeout" and attempts <= max_retries:
+                        continue
+                    else:
+                        break
+                elif resp.get("status") == 200 and resp.get("data") is None:
+                    # Empty 200: naive agent sees status 200 and assumes it succeeded!
+                    success = True
+                    refunds_successful += 1
+                    total_refunded_claimed += amt
+                elif resp.get("status") == "skipped":
+                    # Patch or fault suppressed it
+                    break
+
+        # Step 3: Follow-up action (send email if refund succeeded or attempted)
+        if refunds_successful > 0:
+            step_count += 1
+            tool_call_count += 1
+            transcript.append({"step": step_count, "action": "call send_email", "args": {"to": "customer@example.com", "subject": f"Refund for Order {order_id}"}})
+            email_resp = tools.send_email(to="customer@example.com", subject=f"Refund for Order {order_id}", body=f"Your refund of ${total_refunded_claimed:.2f} has been processed.")
+            transcript.append({"step": step_count, "observation": email_resp})
+            tokens_in += 80
+            tokens_out += 25
+            final_msg = f"Your refund of ${total_refunded_claimed:.2f} has been issued."
+        else:
+            final_msg = f"Unable to process refund for order {order_id}."
+
+        return AgentResult(
+            final_message=final_msg,
+            transcript=transcript,
+            terminated="completed",
+            cost=ExecutionCost(
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                tool_calls=tool_call_count,
+                steps=step_count
+            )
+        )
+
+    def _run_llm(self, user_message: str, tools: ToolRegistry, config: Dict[str, Any]) -> AgentResult:
+        """
+        Run with OpenAI client against Nebius or NVIDIA Nemotron endpoint.
+        """
+        # Formulate tool calling loop
+        tools_def = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_order",
+                    "description": "Fetch details of an order by ID",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"order_id": {"type": "string"}},
+                        "required": ["order_id"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "issue_refund",
+                    "description": "Issue refund for an order",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "order_id": {"type": "string"},
+                            "amount": {"type": "number"}
+                        },
+                        "required": ["order_id", "amount"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "send_email",
+                    "description": "Send email notification to customer",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "to": {"type": "string"},
+                            "subject": {"type": "string"},
+                            "body": {"type": "string"}
+                        },
+                        "required": ["to", "subject", "body"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "create_ticket",
+                    "description": "Create support ticket",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "order_id": {"type": "string"},
+                            "summary": {"type": "string"}
+                        },
+                        "required": ["order_id", "summary"]
+                    }
+                }
+            }
+        ]
+
+        system_prompt = (
+            "You are a customer support refund agent. "
+            "Help the customer with their refund request using available tools. "
+            "If a tool call times out or errors, retry it to make sure the customer is helped."
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message}
+        ]
+
+        transcript = []
+        tokens_in = 0
+        tokens_out = 0
+        tool_call_count = 0
+        step_count = 0
+
+        max_steps = config.get("max_steps", 6)
+        for _ in range(max_steps):
+            step_count += 1
+            try:
+                response = self.model_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    tools=tools_def,
+                    temperature=0.0
+                )
+            except Exception as e:
+                # LLM call failure fallback
+                break
+
+            choice = response.choices[0]
+            msg = choice.message
+            if hasattr(response, "usage") and response.usage:
+                tokens_in += response.usage.prompt_tokens
+                tokens_out += response.usage.completion_tokens
+
+            messages.append(msg.model_dump())
+            transcript.append({"step": step_count, "message": msg.model_dump()})
+
+            if not msg.tool_calls:
+                return AgentResult(
+                    final_message=msg.content or "",
+                    transcript=transcript,
+                    terminated="completed",
+                    cost=ExecutionCost(tokens_in=tokens_in, tokens_out=tokens_out, tool_calls=tool_call_count, steps=step_count)
+                )
+
+            for tc in msg.tool_calls:
+                tool_call_count += 1
+                fn_name = tc.function.name
+                fn_args = json.loads(tc.function.arguments)
+                tool_res = {}
+                if fn_name == "get_order":
+                    tool_res = tools.get_order(str(fn_args.get("order_id")))
+                elif fn_name == "issue_refund":
+                    tool_res = tools.issue_refund(str(fn_args.get("order_id")), float(fn_args.get("amount", 0)))
+                elif fn_name == "send_email":
+                    tool_res = tools.send_email(str(fn_args.get("to")), str(fn_args.get("subject")), str(fn_args.get("body")))
+                elif fn_name == "create_ticket":
+                    tool_res = tools.create_ticket(str(fn_args.get("order_id")), str(fn_args.get("summary")))
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(tool_res)
+                })
+                transcript.append({"step": step_count, "tool_response": tool_res})
+
+        return AgentResult(
+            final_message=messages[-1].get("content", "") if isinstance(messages[-1], dict) else getattr(messages[-1], "content", ""),
+            transcript=transcript,
+            terminated="max_steps",
+            cost=ExecutionCost(tokens_in=tokens_in, tokens_out=tokens_out, tool_calls=tool_call_count, steps=step_count)
+        )
