@@ -320,14 +320,17 @@ def test_generated_regression_test_handles_winner_and_no_winner():
         type="wrapper.retry_policy",
         description="A real verified patch"
     )
-    code_with_winner = orch.generate_regression_test_file(winner)
-    assert 'patch_id="patch_custom_winner"' in code_with_winner
-    assert 'type="wrapper.retry_policy"' in code_with_winner
+    code_with_winner = orch.generate_regression_test_file(winner)  # pure: must not touch tests/
+    assert "'patch_id': 'patch_custom_winner'" in code_with_winner
+    assert "'type': 'wrapper.retry_policy'" in code_with_winner
+    assert "'description': 'A real verified patch'" in code_with_winner
+    assert "'name': 'Custom Hardened Wrapper'" in code_with_winner
 
     # Case B: No winner passed
     code_no_winner = orch.generate_regression_test_file(None)
-    assert "No candidate patch passed all 4 verifier guards" in code_no_winner
-    assert "patch_id=" not in code_no_winner
+    assert "No candidate patch passed all verifier guards" in code_no_winner
+    assert "patch_id" not in code_no_winner
+    assert "WINNING_PATCH" not in code_no_winner
 
 
 def test_timeout_before_refund_is_applied():
@@ -431,46 +434,173 @@ def test_missing_operation_id_in_llm_tool_call_path():
     assert "operation_id is required" in tool_responses[0]["message"]
 
 
-def test_repeated_retries_reuse_same_operation_id_prevent_duplicates():
+IDEMPOTENT_PATCH_SPECS = [
+    ("patch_idempotency_key", "wrapper.idempotency_key"),
+    ("patch_read_back_verify", "wrapper.read_back_verify"),
+    ("patch_retry_policy", "wrapper.retry_policy"),
+    ("patch_combo_idemp_readback", "combo.idempotency_and_read_back"),
+]
+
+
+def _patched(patch_id, patch_type, ws, faults):
+    ledger = CausalLedger()
+    raw = ToolRegistry(ws, ledger, FaultInjector(faults))
+    patch = PatchSpec(patch_id=patch_id, name=patch_id, type=patch_type, description="test") if patch_id else None
+    return PatchedToolRegistry(raw, patch=patch), raw, ledger
+
+
+def _mutations(ledger):
+    return [e for e in ledger.events if e.type == "world_mutation" and e.effect == "refund_created"]
+
+
+@pytest.mark.parametrize("patch_id,patch_type", IDEMPOTENT_PATCH_SPECS)
+def test_repeated_retries_reuse_same_operation_id_prevent_duplicates(patch_id, patch_type):
     """
-    Test 14: An operation experiences multiple consecutive failures (e.g. timeout on retry 1, empty 200 on retry 2).
-    Across 3 attempts of the exact same operation_id, it is executed exactly once in world state.
+    One logical operation, three attempts with the SAME operation_id and two consecutive injected faults:
+      call 0: empty_200 with effect_applied=False  (agent sees an empty 200; nothing was mutated)
+      call 1: timeout_after_success                (mutation applied, agent sees a timeout)
+      call 2: no fault                             (idempotent replay)
+    Exactly one refund may exist at the end, and no response may claim a refund that does not exist.
     """
     ws = WorldState({"orders": [{"id": "8004", "status": "delivered", "total": 90.0, "refunded_amount": 0.0}]})
-    ledger = CausalLedger()
-    # Call 0: timeout_after_success (mutates, returns timeout)
-    # Call 1: timeout (tool returns cached idempotency response, does not mutate again)
-    # Call 2: succeeds cleanly
     faults = [
-        FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")
+        FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False),
+        FaultConfig(tool="issue_refund", call_index=1, type="timeout_after_success"),
     ]
-    raw_tools = ToolRegistry(ws, ledger, FaultInjector(faults))
-    patch = PatchSpec(
-        patch_id="patch_idempotency_key",
-        name="Idempotency Key",
-        type="wrapper.idempotency_key",
-        description="Key"
-    )
-    patched = PatchedToolRegistry(raw_tools, patch=patch)
-
+    tools, raw, ledger = _patched(patch_id, patch_type, ws, faults)
     op_id = "op_8004_stable_multitry"
-    # Attempt 1
-    r1 = patched.issue_refund("8004", 45.0, operation_id=op_id)
-    assert r1.get("error") == "timeout"
-    assert ws.orders["8004"].refunded_amount == 45.0
-    assert len(ws.refunds) == 1
 
-    # Attempt 2
-    r2 = patched.issue_refund("8004", 45.0, operation_id=op_id)
-    assert r2.get("status") == "ok"
-    assert ws.orders["8004"].refunded_amount == 45.0
-    assert len(ws.refunds) == 1
+    # Attempt 1: fault before any mutation. Must NOT be reported as a completed refund.
+    r1 = tools.issue_refund("8004", 45.0, operation_id=op_id)
+    assert r1.get("status") != "ok"
+    assert "refund_id" not in r1
+    assert len(ws.refunds) == 0
+    assert ws.orders["8004"].refunded_amount == 0.0
+    assert ws.orders["8004"].status == "delivered"
 
-    # Attempt 3 (redundant retry)
-    r3 = patched.issue_refund("8004", 45.0, operation_id=op_id)
-    assert r3.get("status") == "ok"
-    assert ws.orders["8004"].refunded_amount == 45.0
+    # Attempt 2: mutation applied, agent sees a timeout (ambiguous). State now has exactly one refund.
+    r2 = tools.issue_refund("8004", 45.0, operation_id=op_id)
     assert len(ws.refunds) == 1
+    assert ws.orders["8004"].refunded_amount == 45.0
+    refund = next(iter(ws.refunds.values()))
+    assert refund.idempotency_key == f"idem_{op_id}"
+    if patch_type == "wrapper.idempotency_key":
+        assert r2 == {"error": "timeout"}
+    else:
+        assert r2["status"] == "ok"
+        assert r2["refund_id"] == refund.id
+        assert r2["verified_by_readback"] is True
+
+    # Attempt 3: retry with the same operation_id must replay the original result, not mutate again.
+    r3 = tools.issue_refund("8004", 45.0, operation_id=op_id)
+    assert r3["status"] == "ok"
+    assert r3["refund_id"] == refund.id
+
+    # Ground truth: exactly once.
+    assert len(ws.refunds) == 1
+    assert ws.orders["8004"].refunded_amount == 45.0
+    assert ws.orders["8004"].status == "partially_refunded"
+    assert len(_mutations(ledger)) == 1
+
+
+def test_same_fault_sequence_without_patch_duplicates_refund():
+    """Control: with no patch the identical sequence double-refunds (proves the test discriminates)."""
+    ws = WorldState({"orders": [{"id": "8004", "status": "delivered", "total": 90.0, "refunded_amount": 0.0}]})
+    faults = [
+        FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False),
+        FaultConfig(tool="issue_refund", call_index=1, type="timeout_after_success"),
+    ]
+    tools, raw, ledger = _patched(None, None, ws, faults)
+    op_id = "op_8004_stable_multitry"
+    r1 = tools.issue_refund("8004", 45.0, operation_id=op_id)
+    r2 = tools.issue_refund("8004", 45.0, operation_id=op_id)
+    r3 = tools.issue_refund("8004", 45.0, operation_id=op_id)
+    assert r1 == {"status": 200, "data": None}
+    assert r2 == {"error": "timeout"}
+    assert r3["status"] == "ok"
+    assert len(ws.refunds) == 2
+    assert ws.orders["8004"].refunded_amount == 90.0
+    assert len(_mutations(ledger)) == 2
+
+
+def test_fault_scheduled_on_idempotent_replay_is_not_observed():
+    """
+    Documents actual ToolRegistry behavior: the FaultInjector counter advances on every call, but a replayed
+    idempotency key returns the cached result before any fault is applied.
+    """
+    ws = WorldState({"orders": [{"id": "8006", "status": "delivered", "total": 90.0, "refunded_amount": 0.0}]})
+    faults = [
+        FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success"),
+        FaultConfig(tool="issue_refund", call_index=1, type="timeout_after_success"),
+    ]
+    tools, raw, ledger = _patched("patch_idempotency_key", "wrapper.idempotency_key", ws, faults)
+    r1 = tools.issue_refund("8006", 45.0, operation_id="op_x")
+    r2 = tools.issue_refund("8006", 45.0, operation_id="op_x")
+    assert r1 == {"error": "timeout"}
+    assert r2["status"] == "ok"
+    assert raw.fault_injector.call_counters["issue_refund"] == 2
+    assert len(ws.refunds) == 1
+    assert ws.orders["8006"].refunded_amount == 45.0
+
+
+@pytest.mark.parametrize("patch_id,patch_type", [
+    ("patch_idempotency_key", "wrapper.idempotency_key"),
+    ("patch_combo_idemp_readback", "combo.idempotency_and_read_back"),
+])
+def test_independent_same_amount_operations_with_ambiguous_timeout(patch_id, patch_type):
+    """Two independent $45 refunds (distinct operation_ids) plus a retry of the first."""
+    ws = WorldState({"orders": [{"id": "8007", "status": "delivered", "total": 90.0, "refunded_amount": 0.0}]})
+    faults = [FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")]
+    tools, raw, ledger = _patched(patch_id, patch_type, ws, faults)
+
+    a1 = tools.issue_refund("8007", 45.0, operation_id="op_A")
+    assert a1.get("error") == "timeout" or a1.get("verified_by_readback") is True
+    assert len(ws.refunds) == 1
+    refund_a = next(iter(ws.refunds.values()))
+
+    b = tools.issue_refund("8007", 45.0, operation_id="op_B")
+    assert b["status"] == "ok"
+    assert b["refund_id"] != refund_a.id
+    assert len(ws.refunds) == 2
+
+    a2 = tools.issue_refund("8007", 45.0, operation_id="op_A")
+    assert a2["status"] == "ok"
+    assert a2["refund_id"] == refund_a.id
+
+    keys = {r.idempotency_key for r in ws.refunds.values()}
+    assert keys == {"idem_op_A", "idem_op_B"}
+    assert len(ws.refunds) == 2
+    assert ws.orders["8007"].refunded_amount == 90.0
+    assert ws.orders["8007"].status == "refunded"
+    assert len(_mutations(ledger)) == 2
+
+
+def test_agent_pre_mutation_fault_then_timeout_end_to_end():
+    """Full agent loop: empty_200 (not applied) then timeout_after_success."""
+    scenario = Scenario(
+        scenario_id="sc_pre_mutation_then_timeout",
+        split="held_out",
+        category="compound_faults",
+        initial_state={"orders": [{"id": "8812", "status": "delivered", "total": 85.0, "refunded_amount": 0.0}]},
+        customer_message="Please refund order 8812, package arrived broken.",
+        faults=[
+            FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False),
+            FaultConfig(tool="issue_refund", call_index=1, type="timeout_after_success"),
+        ],
+        expected_outcome=ExpectedOutcome(refund_count=1, refund_total=42.5, email_count=1),
+    )
+    base = EpisodeRunner.run_episode(scenario, patch=None)
+    assert base["record"].final_state["refund_count"] == 0
+    assert base["detection"].silent_failure_false_success is True
+    assert base["is_correct"] is False
+
+    patch = PatchSpec(patch_id="patch_retry_policy", name="retry", type="wrapper.retry_policy", description="test")
+    fixed = EpisodeRunner.run_episode(scenario, patch=patch)
+    assert fixed["record"].final_state["refund_count"] == 1
+    assert fixed["record"].final_state["refund_total"] == 42.5
+    assert fixed["detection"].duplicate_action is False
+    assert fixed["detection"].silent_failure_false_success is False
+    assert fixed["is_correct"] is True
 
 
 def test_legitimate_successful_completion_and_error_recovery():

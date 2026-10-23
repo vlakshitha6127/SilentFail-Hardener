@@ -432,7 +432,7 @@
         "patch_id": "patch_retry_policy",
         "name": "State-Checked Retry Policy Wrapper",
         "type": "wrapper.retry_policy",
-        "description": "Re-checks exact operation completion on timeout before permitting retries.",
+        "description": "On timeout/empty-200, looks up a refund recorded under the operation's stable idempotency key before reporting the outcome; retries reuse the same key.",
         "is_control": false,
         "config": {}
       },
@@ -502,7 +502,7 @@
     "patch_id": "patch_retry_policy",
     "name": "State-Checked Retry Policy Wrapper",
     "type": "wrapper.retry_policy",
-    "description": "Re-checks exact operation completion on timeout before permitting retries.",
+    "description": "On timeout/empty-200, looks up a refund recorded under the operation's stable idempotency key before reporting the outcome; retries reuse the same key.",
     "is_control": false,
     "config": {}
   },
@@ -615,7 +615,7 @@
     }
   },
   "sample_failing_record": {
-    "run_id": "run_585db81b",
+    "run_id": "run_1ff13f67",
     "scenario_id": "sc_train_00002",
     "agent_version": "baseline",
     "patch_id": null,
@@ -680,7 +680,7 @@
         "tool": null,
         "args": null,
         "effect": "refund_created",
-        "refund_id": "rf_b3fe95",
+        "refund_id": "rf_c47089",
         "amount": 54.8,
         "observed": null,
         "fault": null,
@@ -758,11 +758,11 @@
       },
       "refunds": [
         {
-          "id": "rf_b3fe95",
+          "id": "rf_c47089",
           "order_id": "2679",
           "amount": 54.8,
           "idempotency_key": null,
-          "created_at": 1792739782.2254634
+          "created_at": 1792740256.7237554
         }
       ]
     },
@@ -781,9 +781,9 @@
     "verification_runs": 300,
     "total_episodes_evaluated": 410,
     "median_seconds_per_episode": 0.0,
-    "measured_wall_clock_sec": 0.2964,
+    "measured_wall_clock_sec": 0.2379,
     "speedup_factor": null,
     "note": "Measured in local deterministic simulation mode."
   },
-  "generated_test_code": "\"\"\"\nAuto-generated SilentFail Regression Test.\nGuarantees prevention of duplicate refunds after timeouts\nwhile protecting legitimate repeated partial refunds from over-suppression.\n\"\"\"\n\nimport pytest\nfrom src.silentfail.models import Scenario, ExpectedOutcome, FaultConfig, PatchSpec\nfrom src.silentfail.runner import EpisodeRunner\n\nWINNING_PATCH = PatchSpec(\n    patch_id=\"patch_retry_policy\",\n    name=\"State-Checked Retry Policy Wrapper\",\n    type=\"wrapper.retry_policy\",\n    description=\"Auto-selected patch passing all 4 regression and legitimate-completion guards.\"\n)\n\ndef test_regression_timeout_duplicate_failure_cured():\n    \"\"\"Worst-case baseline scenario: must fail on baseline, pass on winning patch.\"\"\"\n    scenario = Scenario(\n        scenario_id=\"sc_regression_timeout\",\n        split=\"held_out\",\n        category=\"timeout_after_success\",\n        initial_state={\"orders\": [{\"id\": \"8812\", \"status\": \"delivered\", \"total\": 85.0, \"refunded_amount\": 0.0}]},\n        customer_message=\"Please refund order 8812, package arrived broken.\",\n        faults=[FaultConfig(tool=\"issue_refund\", call_index=0, type=\"timeout_after_success\")],\n        expected_outcome=ExpectedOutcome(refund_count=1, refund_total=42.5, email_count=1)\n    )\n\n    # 1. Baseline must produce duplicate failure\n    base_res = EpisodeRunner.run_episode(scenario, patch=None)\n    assert base_res[\"detection\"].duplicate_action is True\n\n    # 2. Hardened agent must prevent duplicate and succeed cleanly\n    patched_res = EpisodeRunner.run_episode(scenario, patch=WINNING_PATCH)\n    assert patched_res[\"detection\"].duplicate_action is False\n    assert patched_res[\"record\"].final_state[\"refund_count\"] == 1\n    assert patched_res[\"is_correct\"] is True\n\ndef test_legitimate_repeat_is_not_oversuppressed():\n    \"\"\"Legitimate partial refunds scenario: verifies patch does not over-suppress valid repeats.\"\"\"\n    scenario = Scenario(\n        scenario_id=\"sc_legit_repeat_guard\",\n        split=\"held_out\",\n        category=\"legitimate_repeat\",\n        initial_state={\"orders\": [{\"id\": \"9933\", \"status\": \"delivered\", \"total\": 90.0, \"refunded_amount\": 0.0}]},\n        customer_message=\"Please refund items 1 and 2 for order 9933 as two valid partial refunds.\",\n        faults=[],\n        expected_outcome=ExpectedOutcome(refund_count=2, refund_total=90.0, email_count=1)\n    )\n\n    patched_res = EpisodeRunner.run_episode(scenario, patch=WINNING_PATCH)\n    assert patched_res[\"record\"].final_state[\"refund_count\"] == 2\n    assert patched_res[\"detection\"].over_suppression is False\n    assert patched_res[\"is_correct\"] is True\n"
+  "generated_test_code": "\"\"\"\nAuto-generated SilentFail Regression Test. Do not edit by hand.\nRegenerate with the pipeline (see README); it is rendered from the winning PatchSpec in\ndata/latest_pipeline_run.json, and tests/test_pipeline_artifact_sync.py checks they match.\nGuarantees prevention of duplicate refunds after timeouts\nwhile protecting legitimate repeated partial refunds from over-suppression.\n\"\"\"\n\nfrom src.silentfail.models import Scenario, ExpectedOutcome, FaultConfig, PatchSpec\nfrom src.silentfail.runner import EpisodeRunner\n\nWINNING_PATCH = PatchSpec(**{'patch_id': 'patch_retry_policy',\n 'name': 'State-Checked Retry Policy Wrapper',\n 'type': 'wrapper.retry_policy',\n 'description': 'On timeout/empty-200, looks up a refund recorded under the '\n                \"operation's stable idempotency key before reporting the \"\n                'outcome; retries reuse the same key.',\n 'is_control': False,\n 'config': {}})\n\n\ndef test_regression_timeout_duplicate_failure_cured():\n    \"\"\"Worst-case baseline scenario: must fail on baseline, pass on winning patch.\"\"\"\n    scenario = Scenario(\n        scenario_id=\"sc_regression_timeout\",\n        split=\"held_out\",\n        category=\"timeout_after_success\",\n        initial_state={\"orders\": [{\"id\": \"8812\", \"status\": \"delivered\", \"total\": 85.0, \"refunded_amount\": 0.0}]},\n        customer_message=\"Please refund order 8812, package arrived broken.\",\n        faults=[FaultConfig(tool=\"issue_refund\", call_index=0, type=\"timeout_after_success\")],\n        expected_outcome=ExpectedOutcome(refund_count=1, refund_total=42.5, email_count=1)\n    )\n\n    # 1. Baseline must produce duplicate failure\n    base_res = EpisodeRunner.run_episode(scenario, patch=None)\n    assert base_res[\"detection\"].duplicate_action is True\n\n    # 2. Hardened agent must prevent duplicate and succeed cleanly\n    patched_res = EpisodeRunner.run_episode(scenario, patch=WINNING_PATCH)\n    assert patched_res[\"detection\"].duplicate_action is False\n    assert patched_res[\"record\"].final_state[\"refund_count\"] == 1\n    assert patched_res[\"is_correct\"] is True\n\n\ndef test_legitimate_repeat_is_not_oversuppressed():\n    \"\"\"Legitimate partial refunds scenario: verifies patch does not over-suppress valid repeats.\"\"\"\n    scenario = Scenario(\n        scenario_id=\"sc_legit_repeat_guard\",\n        split=\"held_out\",\n        category=\"legitimate_repeat\",\n        initial_state={\"orders\": [{\"id\": \"9933\", \"status\": \"delivered\", \"total\": 90.0, \"refunded_amount\": 0.0}]},\n        customer_message=\"Please refund items 1 and 2 for order 9933 as two valid partial refunds.\",\n        faults=[],\n        expected_outcome=ExpectedOutcome(refund_count=2, refund_total=90.0, email_count=1)\n    )\n\n    patched_res = EpisodeRunner.run_episode(scenario, patch=WINNING_PATCH)\n    assert patched_res[\"record\"].final_state[\"refund_count\"] == 2\n    assert patched_res[\"detection\"].over_suppression is False\n    assert patched_res[\"is_correct\"] is True\n"
 }

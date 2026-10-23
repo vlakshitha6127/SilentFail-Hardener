@@ -15,7 +15,7 @@ When tool calls experience realistic network faults (timeouts after success, emp
 1. **Deterministic Causal Side-Effect Ledger**: Tracks what the agent saw versus what actually mutated in ground-truth world state.
 2. **Failure Detectors**: Pure deterministic evaluation for duplicate actions, false-success claims, missed actions, and over-suppression.
 3. **Automated Closed-Loop Verifier**: Searches typed declarative candidate patches across training scenarios.
-4. **Strict 4-Guard Selection Engine**:
+4. **Guarded Selection Engine**:
    - **Regression Guard**: Protects against drops in baseline task completion.
    - **Legitimate-Completion Guard**: Rejects degenerate candidates (e.g. `refuse_all` or `blind_dedupe`) that over-suppress valid repeat actions.
    - **No New Failure Class Guard**: Ensures no secondary failure rate increases.
@@ -43,7 +43,7 @@ Root-Cause Diagnosis & Candidate Proposer (Nemotron Ultra + Labeled Controls)
 Verifier Sweep (Candidates × Scenarios)
   │
   ▼
-4-Guard Selection Engine (Regression, Legit-Completion, Cost, New Class)
+Guarded Selection Engine (Regression, Legit-Completion, Cost, New Class)
   │
   ▼
 Held-Out Confirmation (Unseen Scenarios) ➔ Winning Patch + Runnable Pytest Fixture
@@ -78,9 +78,12 @@ Add your `NEBIUS_API_KEY` if testing remote Nebius Token Factory endpoints. If o
 
 ### 3. Run Automated Tests
 ```bash
-pytest -v tests/
+py -m pytest -q
 ```
-All 8 integration, detector, generality probe, and auto-generated regression tests will execute.
+On Linux / macOS:
+```bash
+python -m pytest -q
+```
 
 ### 4. Launch Dashboard
 ```bash
@@ -97,22 +100,34 @@ Open [http://localhost:8000](http://localhost:8000) in your browser:
 ## 📊 Benchmark Results (Traced to `data/latest_pipeline_run.json`)
 
 > [!NOTE]
-> **Execution Mode**: **Deterministic Local Simulation** (Remote Nebius endpoint was not queried during this run).  
-> **Dataset**: 50 Training Scenarios (300 verification episodes across 6 candidates) + 30 Held-Out Validation Scenarios under the published 9-category fault distribution.  
-> **Winning Patch Selected**: `patch_retry_policy` (State-Checked Retry Policy Wrapper passing all implemented verifier guards).
+> **Execution Mode**: **Deterministic Local Simulation.** The remote Nebius endpoint was **not** queried (`gate_g0.connected = false`, `speedup_factor = null`). No remote execution, remote latency, or throughput is claimed here.
+> **Dataset**: 50 training scenarios (300 verification episodes across 6 candidates; 410 episodes executed in total including held-out) + 30 held-out scenarios, seeded, drawn from the 9-category fault mix. Small samples: read the intervals.
+> **Winning Patch Selected**: `patch_retry_policy`. Note that 4 candidates passed all guards with identical duplicate-action reduction on the training set; the winner was picked by the simplicity tie-breaker (shorter type string), not by superior measured performance.
 
-### Baseline vs Hardened Performance (Paired Held-Out Evaluation on Same 30 Scenarios)
+### Baseline vs Hardened (Paired Held-Out Evaluation, same 30 scenarios)
+Values are rate (count/denominator) [Wilson 95% CI].
 
-| Metric | Held-Out Baseline (Naive Agent) | Held-Out Hardened (`patch_retry_policy`) | Delta / Verifier Guard Outcome |
-|---|---|---|---|
-| **Duplicate-Action Rate** | **10.0%** (3/30) [3.5% - 25.6%] | **0.0%** (0/30) [0.0% - 11.4%] | **-100% (Duplicate refunds fully eliminated)** |
-| **Silent Failure / False Success** | **16.7%** (5/30) [7.3% - 33.6%] | **0.0%** (0/30) [0.0% - 11.4%] | **-100% (Silent failures eliminated)** |
-| **Correct Completion Rate** | **46.7%** (14/30) [30.2% - 63.9%] | **46.7%** (14/30) [30.2% - 63.9%] | **Maintained (Regression Guard passed)** |
-| **Legitimate Completion Rate** | **77.8%** (7/9) [45.3% - 93.7%] | **77.8%** (7/9) [45.3% - 93.7%] | **Maintained (Over-Suppression Guard passed)** |
-| **Mean Execution Steps** | 2.93 steps | 2.90 steps | **Cost Guard Compliant** |
+| Metric (denominator) | Baseline (naive agent) | Hardened (`patch_retry_policy`) |
+|---|---|---|
+| **Duplicate-action rate** (all runs) | 10.0% (3/30) [3.5% - 25.6%] | 0.0% (0/30) [0.0% - 11.3%] |
+| **Silent failure rate** (all runs) | 16.7% (5/30) [7.3% - 33.6%] | 0.0% (0/30) [0.0% - 11.3%] |
+| **Claimed-success share among incorrect runs** (`conditional_false_success_rate`; incorrect runs only) | 87.5% (14/16) [64.0% - 96.5%] | 100.0% (16/16) [80.6% - 100.0%] |
+| **Correct completion rate** (all runs) | 46.7% (14/30) [30.2% - 63.9%] | 46.7% (14/30) [30.2% - 63.9%] |
+| **Legitimate completion rate** (legitimate-repeat + no-fault runs) | 77.8% (7/9) [45.3% - 93.7%] | 77.8% (7/9) [45.3% - 93.7%] |
+| **Mean execution steps** | 2.93 | 2.90 |
 
-### Implemented Verifier Guards (Evaluation Engine)
-*Note: These represent the 8 distinct analytical guards enforced by the Verifier during candidate selection (`runner.py`), separate from the 21 automated unit/integration tests executed by `pytest`:*
+With n=30 the upper confidence bound for a 0/30 rate is still 11.3%, so "0 observed" is not "proven zero".
+
+### What the metrics mean (`runner.py` / `detectors.py`)
+- **`silent_failure_rate`** (`counts.silent_fail` / `counts.total`): the final message claims a refund was issued **and** ground-truth state contradicts it: no refund exists, the claimed amount exceeds the refunded total, or a duplicate refund occurred.
+- **`conditional_false_success_rate`** (claimed-success runs / `counts.cond_failed_total`): among runs that are **not correct**, the share whose final message claims a refund was issued. Despite its name it does **not** count false claims, and its denominator is incorrect runs, not all runs. It can be 100% while `silent_failure_rate` is 0%.
+- **Correct completion**: no duplicate, no silent failure, no missed action, and no incorrect completion (`counts.correct` / `counts.total`).
+
+### Why hardened correct completion did not improve (16/30 still incorrect)
+The patch removes the fault-driven failures it targets (duplicates 3 → 0, silent failures 5 → 0, missed actions 2 → 0), but all 16 remaining hardened runs are *incorrect completions* with the expected refund **count** and a refund **total** that differs from the scenario's expected total. They claim a refund, which is why the conditional metric is 16/16. The cause is a benchmark mismatch, not a fault: the reference naive agent refunds half of orders totalling $50 or more, while single-refund scenarios expect the full order price (this also fails 2 of 2 no-fault controls). Until the agent or the scenario expectations are reconciled, correct-completion is capped by this and is not evidence about the patch.
+
+### Implemented Verifier Guards (8 verifier guards)
+The verifier deterministically evaluates candidates using 8 verifier guards:
 1. **Incomplete/Missing Metrics Guard**: Rejects malformed or incomplete candidate metrics before evaluation.
 2. **Regression Guard**: Protects against drops in baseline task completion rate beyond tolerance.
 3. **Legitimate-Completion Guard**: Protects valid multi-item/partial refunds and no-fault actions against refusal.
@@ -129,7 +144,15 @@ Open [http://localhost:8000](http://localhost:8000) in your browser:
 To reproduce this benchmark run:
 ```bash
 py -c "from src.silentfail.orchestrator import Orchestrator; Orchestrator().run_full_pipeline(50, 30)"
+py -m pytest -q
 ```
+Counts, intervals, the winner, and guard outcomes are deterministic; timing fields and sample refund IDs vary per run.
+
+### Known Limitations
+- It is a local simulation only, so the committed results say nothing about Nebius/Nemotron behavior.
+- `wrapper.read_back_verify`, `wrapper.retry_policy` and `combo.idempotency_and_read_back` currently share the same read-back-by-idempotency-key implementation, so they behave identically in this benchmark.
+- Faults scheduled on a replayed idempotency key are consumed but never applied at the tool layer.
+- The correct-completion cap described above.
 
 ---
 

@@ -82,6 +82,18 @@ class BenchmarkAggregator:
     """
     Aggregates run metrics, computes Wilson confidence intervals,
     and checks verifier guards.
+
+    Metric definitions (denominators matter):
+    - correct_completion: is_correct runs / total runs.
+    - silent_failure_rate: runs flagged silent_failure_false_success / total runs. The detector
+      flags a final message that claims a refund was issued while the ground-truth state has no
+      refund, claims more than was refunded, or claims success after a duplicate refund.
+    - conditional_false_success_rate: among runs that are NOT correct (counts.cond_failed_total),
+      the share whose final message claims a refund was issued (claims_refund_issued). Despite the
+      name it is NOT a count of false claims: a wrong-amount run whose message accurately states the
+      amount refunded still counts. Its denominator is incorrect runs, so it is not comparable to
+      silent_failure_rate (denominator: all runs) and can be 1.0 while silent_failure_rate is 0.0.
+    - legitimate_completion_rate: correct runs among legitimate_repeat + no_fault_control scenarios.
     """
     @classmethod
     def aggregate(cls, results: List[Dict[str, Any]], patch_id: str = "baseline") -> Dict[str, Any]:

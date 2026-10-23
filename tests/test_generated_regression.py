@@ -1,19 +1,23 @@
 """
-Auto-generated SilentFail Regression Test.
+Auto-generated SilentFail Regression Test. Do not edit by hand.
+Regenerate with the pipeline (see README); it is rendered from the winning PatchSpec in
+data/latest_pipeline_run.json, and tests/test_pipeline_artifact_sync.py checks they match.
 Guarantees prevention of duplicate refunds after timeouts
 while protecting legitimate repeated partial refunds from over-suppression.
 """
 
-import pytest
 from src.silentfail.models import Scenario, ExpectedOutcome, FaultConfig, PatchSpec
 from src.silentfail.runner import EpisodeRunner
 
-WINNING_PATCH = PatchSpec(
-    patch_id="patch_retry_policy",
-    name="State-Checked Retry Policy Wrapper",
-    type="wrapper.retry_policy",
-    description="Auto-selected patch passing all 4 regression and legitimate-completion guards."
-)
+WINNING_PATCH = PatchSpec(**{'patch_id': 'patch_retry_policy',
+ 'name': 'State-Checked Retry Policy Wrapper',
+ 'type': 'wrapper.retry_policy',
+ 'description': 'On timeout/empty-200, looks up a refund recorded under the '
+                "operation's stable idempotency key before reporting the "
+                'outcome; retries reuse the same key.',
+ 'is_control': False,
+ 'config': {}})
+
 
 def test_regression_timeout_duplicate_failure_cured():
     """Worst-case baseline scenario: must fail on baseline, pass on winning patch."""
@@ -36,6 +40,7 @@ def test_regression_timeout_duplicate_failure_cured():
     assert patched_res["detection"].duplicate_action is False
     assert patched_res["record"].final_state["refund_count"] == 1
     assert patched_res["is_correct"] is True
+
 
 def test_legitimate_repeat_is_not_oversuppressed():
     """Legitimate partial refunds scenario: verifies patch does not over-suppress valid repeats."""

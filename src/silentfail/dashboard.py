@@ -247,19 +247,20 @@ DASHBOARD_HTML = """
                 document.getElementById('timeline-lanes').innerHTML = agentHtml + worldHtml;
             }
 
-            // 2. Scoreboard (Paired Held-Out Baseline vs Hardened)
-            if (data.heldout_metrics_before && data.heldout_metrics_after) {
+            // 2. Scoreboard (paired held-out: same scenarios, baseline vs winning patch; all values from the artifact)
+            if (data.heldout_metrics_before && data.heldout_metrics_after && data.heldout_metrics_after.correct_completion) {
                 const b = data.heldout_metrics_before;
                 const h = data.heldout_metrics_after;
                 const formatCi = (ci) => ci ? `${(ci[0]*100).toFixed(1)}% <span class="ci-tag">[${(ci[1]*100).toFixed(1)}% - ${(ci[2]*100).toFixed(1)}%]</span>` : '--';
-                
+                const pp = (x, y) => { const d = (y[0] - x[0]) * 100; return (d > 0 ? '+' : '') + d.toFixed(1) + ' pp'; };
+
                 const rows = [
-                    { name: 'Duplicate-Action Rate', base: formatCi(b.duplicate_action_rate), hard: formatCi(h.duplicate_action_rate), delta: (b.duplicate_action_rate[0] > h.duplicate_action_rate[0]) ? '<b style="color:var(--success);">-100% (Eliminated)</b>' : 'Maintained' },
-                    { name: 'Silent Failure Rate', base: formatCi(b.silent_failure_rate), hard: formatCi(h.silent_failure_rate), delta: (b.silent_failure_rate[0] > h.silent_failure_rate[0]) ? '<b style="color:var(--success);">-100% (Eliminated)</b>' : 'Maintained' },
-                    { name: 'Conditional False Success', base: formatCi(b.conditional_false_success_rate), hard: formatCi(h.conditional_false_success_rate), delta: 'Measured' },
-                    { name: 'Correct Completion Rate', base: formatCi(b.correct_completion), hard: formatCi(h.correct_completion), delta: 'Maintained' },
-                    { name: 'Legitimate Completion Rate', base: formatCi(b.legitimate_completion_rate), hard: formatCi(h.legitimate_completion_rate), delta: 'Protected' },
-                    { name: 'Mean Execution Steps', base: `${b.mean_steps} steps`, hard: `${h.mean_steps} steps`, delta: 'Cost Guard Compliant' }
+                    { name: 'Duplicate-Action Rate', base: formatCi(b.duplicate_action_rate), hard: formatCi(h.duplicate_action_rate), delta: pp(b.duplicate_action_rate, h.duplicate_action_rate) },
+                    { name: 'Silent Failure Rate (claim contradicts state)', base: formatCi(b.silent_failure_rate), hard: formatCi(h.silent_failure_rate), delta: pp(b.silent_failure_rate, h.silent_failure_rate) },
+                    { name: `Claimed-Success Share of Incorrect Runs (${b.counts.cond_failed_total} vs ${h.counts.cond_failed_total} incorrect runs)`, base: formatCi(b.conditional_false_success_rate), hard: formatCi(h.conditional_false_success_rate), delta: pp(b.conditional_false_success_rate, h.conditional_false_success_rate) },
+                    { name: 'Correct Completion Rate', base: formatCi(b.correct_completion), hard: formatCi(h.correct_completion), delta: pp(b.correct_completion, h.correct_completion) },
+                    { name: 'Legitimate Completion Rate', base: formatCi(b.legitimate_completion_rate), hard: formatCi(h.legitimate_completion_rate), delta: pp(b.legitimate_completion_rate, h.legitimate_completion_rate) },
+                    { name: 'Mean Execution Steps', base: `${b.mean_steps} steps`, hard: `${h.mean_steps} steps`, delta: (h.mean_steps - b.mean_steps).toFixed(2) }
                 ];
 
                 let bodyHtml = '';

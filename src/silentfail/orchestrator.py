@@ -13,6 +13,7 @@ Executes the full closed-loop life cycle:
 from typing import Dict, Any, List, Optional
 import time
 import json
+import pprint
 from pathlib import Path
 from src.silentfail.models import Scenario, PatchSpec
 from src.silentfail.scenarios import ScenarioGenerator
@@ -20,11 +21,17 @@ from src.silentfail.patches import get_default_candidate_patches
 from src.silentfail.runner import EpisodeRunner, BenchmarkAggregator, VerifierAndSelector
 from src.silentfail.nebius import NebiusClient
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+GENERATED_TEST_FILENAME = "test_generated_regression.py"
+
 
 class Orchestrator:
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = "data", tests_dir: Optional[str] = None):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        # Generated regression tests are written next to the repo's tests, anchored to the
+        # repository root (not the current working directory).
+        self.tests_dir = Path(tests_dir) if tests_dir else REPO_ROOT / "tests"
         self.nebius_client = NebiusClient()
         self.verifier = VerifierAndSelector(tolerance=0.02)
         
@@ -128,10 +135,9 @@ class Orchestrator:
             "note": "Measured in local deterministic simulation mode." if not is_cloud_exec else "Measured on remote Nebius endpoint."
         }
 
-        # Step 8: Generate and write Runnable Pytest Regression Test
-        test_code = self.render_regression_test_code(winner)
+        # Step 8: Generate Runnable Pytest Regression Test
+        test_code = self.generate_regression_test_file(winner, write=True)
         self.pipeline_state["generated_test_code"] = test_code
-        self.write_regression_test_file(test_code)
         self.pipeline_state["status"] = "completed"
         self.pipeline_state["progress"] = 100
 
@@ -142,33 +148,45 @@ class Orchestrator:
 
         return self.pipeline_state
 
-    def render_regression_test_code(self, winner: Optional[PatchSpec]) -> str:
-        if not winner:
-            return '''"""
-SilentFail Verification Notice: No candidate patch passed all 4 verifier guards.
+    def generate_regression_test_file(self, winner: Optional[PatchSpec], write: bool = False) -> str:
+        """
+        Renders the regression test for the actual winning PatchSpec.
+        Pure by default (returns source, writes nothing). The pipeline passes write=True.
+        With no winner, a notice is rendered (and written) instead; no patch is fabricated.
+        """
+        test_code = render_regression_test(winner)
+        if write:
+            self.tests_dir.mkdir(parents=True, exist_ok=True)
+            with open(self.tests_dir / GENERATED_TEST_FILENAME, "w", encoding="utf-8", newline="\n") as f:
+                f.write(test_code)
+        return test_code
+
+
+def render_regression_test(winner: Optional[PatchSpec]) -> str:
+    """Deterministically renders regression-test source from the winning PatchSpec (all fields)."""
+    if not winner:
+        return '''"""
+SilentFail Verification Notice: No candidate patch passed all verifier guards.
 No regression test emitted because no safe patch was selected.
 """
 '''
-        winner_id = winner.patch_id
-        winner_type = winner.type
-        winner_name = winner.name
-        
-        return f'''"""
-Auto-generated SilentFail Regression Test.
+    patch_literal = pprint.pformat(winner.model_dump(), sort_dicts=False)
+    return TEST_TEMPLATE.replace("__PATCH_LITERAL__", patch_literal)
+
+
+TEST_TEMPLATE = '''"""
+Auto-generated SilentFail Regression Test. Do not edit by hand.
+Regenerate with the pipeline (see README); it is rendered from the winning PatchSpec in
+data/latest_pipeline_run.json, and tests/test_pipeline_artifact_sync.py checks they match.
 Guarantees prevention of duplicate refunds after timeouts
 while protecting legitimate repeated partial refunds from over-suppression.
 """
 
-import pytest
 from src.silentfail.models import Scenario, ExpectedOutcome, FaultConfig, PatchSpec
 from src.silentfail.runner import EpisodeRunner
 
-WINNING_PATCH = PatchSpec(
-    patch_id="{winner_id}",
-    name="{winner_name}",
-    type="{winner_type}",
-    description="Auto-selected patch passing all 4 regression and legitimate-completion guards."
-)
+WINNING_PATCH = PatchSpec(**__PATCH_LITERAL__)
+
 
 def test_regression_timeout_duplicate_failure_cured():
     """Worst-case baseline scenario: must fail on baseline, pass on winning patch."""
@@ -176,7 +194,7 @@ def test_regression_timeout_duplicate_failure_cured():
         scenario_id="sc_regression_timeout",
         split="held_out",
         category="timeout_after_success",
-        initial_state={{"orders": [{{"id": "8812", "status": "delivered", "total": 85.0, "refunded_amount": 0.0}}]}},
+        initial_state={"orders": [{"id": "8812", "status": "delivered", "total": 85.0, "refunded_amount": 0.0}]},
         customer_message="Please refund order 8812, package arrived broken.",
         faults=[FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")],
         expected_outcome=ExpectedOutcome(refund_count=1, refund_total=42.5, email_count=1)
@@ -192,13 +210,14 @@ def test_regression_timeout_duplicate_failure_cured():
     assert patched_res["record"].final_state["refund_count"] == 1
     assert patched_res["is_correct"] is True
 
+
 def test_legitimate_repeat_is_not_oversuppressed():
     """Legitimate partial refunds scenario: verifies patch does not over-suppress valid repeats."""
     scenario = Scenario(
         scenario_id="sc_legit_repeat_guard",
         split="held_out",
         category="legitimate_repeat",
-        initial_state={{"orders": [{{"id": "9933", "status": "delivered", "total": 90.0, "refunded_amount": 0.0}}]}},
+        initial_state={"orders": [{"id": "9933", "status": "delivered", "total": 90.0, "refunded_amount": 0.0}]},
         customer_message="Please refund items 1 and 2 for order 9933 as two valid partial refunds.",
         faults=[],
         expected_outcome=ExpectedOutcome(refund_count=2, refund_total=90.0, email_count=1)
@@ -209,14 +228,3 @@ def test_legitimate_repeat_is_not_oversuppressed():
     assert patched_res["detection"].over_suppression is False
     assert patched_res["is_correct"] is True
 '''
-
-    def write_regression_test_file(self, test_code: str, target_path: Optional[Path] = None) -> Path:
-        target = target_path or (Path(__file__).resolve().parent.parent.parent / "tests" / "test_generated_regression.py")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with open(target, "w", encoding="utf-8") as f:
-            f.write(test_code)
-        return target
-
-    def generate_regression_test_file(self, winner: Optional[PatchSpec]) -> str:
-        """Backward-compatibility wrapper."""
-        return self.render_regression_test_code(winner)

@@ -183,7 +183,7 @@ def get_default_candidate_patches() -> list[PatchSpec]:
             patch_id="patch_retry_policy",
             name="State-Checked Retry Policy Wrapper",
             type="wrapper.retry_policy",
-            description="Re-checks exact operation completion on timeout before permitting retries.",
+            description="On timeout/empty-200, looks up a refund recorded under the operation's stable idempotency key before reporting the outcome; retries reuse the same key.",
             is_control=False
         ),
         PatchSpec(
