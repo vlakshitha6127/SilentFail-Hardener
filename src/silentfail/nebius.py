@@ -15,6 +15,11 @@ import json
 import time
 from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 try:
     from openai import OpenAI
@@ -27,10 +32,10 @@ from src.silentfail.models import PatchSpec
 class NebiusClient:
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         self.api_key = api_key or os.getenv("NEBIUS_API_KEY", "")
-        self.base_url = base_url or os.getenv("NEBIUS_BASE_URL", "https://api.studio.nebius.ai/v1")
-        self.nano_model = os.getenv("NEMOTRON_NANO_MODEL", "nvidia/nemotron-mini-4b-instruct")
-        self.super_model = os.getenv("NEMOTRON_SUPER_MODEL", "nvidia/nemotron-4-340b-instruct")
-        self.ultra_model = os.getenv("NEMOTRON_ULTRA_MODEL", "nvidia/nemotron-4-340b-instruct")
+        self.base_url = base_url or os.getenv("NEBIUS_BASE_URL", "https://api.tokenfactory.nebius.com/v1")
+        self.nano_model = os.getenv("NEMOTRON_NANO_MODEL", "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B")
+        self.super_model = os.getenv("NEMOTRON_SUPER_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+        self.ultra_model = os.getenv("NEMOTRON_ULTRA_MODEL", "nvidia/Nemotron-3-Ultra-550b-a55b")
         
         self.is_live = False
         self.client: Optional[OpenAI] = None
