@@ -94,15 +94,31 @@ Open [http://localhost:8000](http://localhost:8000) in your browser:
 
 ---
 
-## 📊 Measured Benchmark Results (Under Published Fault Distribution)
+## 📊 Benchmark Results (Traced to `data/latest_pipeline_run.json`)
 
-| Metric | Baseline (Naive Agent) | Hardened (Winning Patch) | Delta / Outcome |
+> [!NOTE]
+> **Execution Mode**: **Deterministic Local Simulation** (Remote Nebius endpoint was not queried during this run).  
+> **Dataset**: 50 Training Scenarios (300 verification episodes across 6 candidates) + 30 Held-Out Validation Scenarios under the published 9-category fault distribution.  
+> **Winning Patch Selected**: `patch_retry_policy` (State-Checked Retry Policy Wrapper passing all 8 active verifier guards).
+
+### Baseline vs Hardened Performance (Held-Out Evaluation)
+
+| Metric | Baseline (Naive Agent) | Hardened (`patch_retry_policy`) | Delta / Verifier Guard Outcome |
 |---|---|---|---|
-| **Duplicate-Action Rate** | **30.0%** [18.9% - 44.0%] | **0.0%** [0.0% - 11.3%] | **-100% (Completely Eliminated)** |
-| **Conditional False Success** | **50.0%** [30.7% - 69.3%] | **0.0%** | **Truthful reporting restored** |
-| **Correct Completion** | 50.0% [36.6% - 63.4%] | **70.0%** [51.9% - 83.7%] | **+20.0% Gain** |
-| **Legitimate Completion** | **100.0%** | **100.0%** | **Guarded against over-suppression** |
-| **Mean Execution Steps** | 4.60 | 4.60 | **Cost Guard Compliant** |
+| **Duplicate-Action Rate** | **10.0%** [3.5% - 25.6%] | **0.0%** [0.0% - 11.4%] | **-100% (Duplicate refunds fully eliminated)** |
+| **Correct Completion Rate** | 26.0% [15.9% - 39.6%] | **46.7%** [30.2% - 63.9%] | **+20.7% (Regression Guard passed)** |
+| **Legitimate Completion Rate** | 64.3% [38.8% - 83.7%] | **77.8%** [45.3% - 93.7%] | **Maintained (Over-Suppression Guard passed)** |
+| **Conditional False Success** | **86.5%** [72.0% - 94.1%] | **0.0%** | **False claims suppressed** |
+| **Mean Execution Steps** | 3.26 steps | 3.26 steps | **Compliant (Cost Guard passed)** |
+
+### Verifier Guard Rejections Recorded
+- `control_refuse_all`: **REJECTED** by Regression Guard (dropped completion) and Legitimate-Completion Guard.
+- `control_blind_dedupe`: **REJECTED** by Legitimate-Completion Guard and Over-Suppression Guard (broke legitimate multi-item refunds).
+
+To reproduce this benchmark run:
+```bash
+python -c "from src.silentfail.orchestrator import Orchestrator; Orchestrator().run_full_pipeline(50, 30)"
+```
 
 ---
 

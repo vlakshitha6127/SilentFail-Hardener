@@ -27,6 +27,8 @@ class PatchedToolRegistry:
         self._op_key_map: Dict[str, str] = {}
         self._op_seq_counter: int = 0
         self._order_refunded_keys: set = set()
+        # Tracks last failed/timed-out operation per order for LLMs/callers that do not supply operation_id
+        self._last_unresolved_op_by_order: Dict[str, str] = {}
 
     def get_order(self, order_id: str) -> Dict[str, Any]:
         return self.raw.get_order(order_id)
@@ -36,10 +38,16 @@ class PatchedToolRegistry:
         Resolves or generates a unique logical operation ID.
         Never infers logical identity from (order_id + amount).
         Two separate refund calls for the same order and same amount receive distinct operation IDs
-        unless explicitly linked via operation_id across retries.
+        unless explicitly linked via operation_id across retries, or continuing an unresolved retry on that order.
         """
         if operation_id:
             return operation_id
+        
+        # If the immediately preceding operation on this order timed out or failed without resolution,
+        # treat this unadorned follow-up call as a retry of that same logical operation.
+        if order_id in self._last_unresolved_op_by_order:
+            return self._last_unresolved_op_by_order[order_id]
+
         self._op_seq_counter += 1
         return f"op_{order_id}_{self._op_seq_counter}"
 
@@ -109,7 +117,12 @@ class PatchedToolRegistry:
 
         # 3. Wrapper: idempotency_key
         if p_type == "wrapper.idempotency_key":
-            return self.raw.issue_refund(order_id, amount, idempotency_key=stable_key, operation_id=op_id)
+            resp = self.raw.issue_refund(order_id, amount, idempotency_key=stable_key, operation_id=op_id)
+            if resp.get("status") == "ok":
+                self._last_unresolved_op_by_order.pop(order_id, None)
+            else:
+                self._last_unresolved_op_by_order[order_id] = op_id
+            return resp
 
         # 4. Wrapper: read_back_verify
         if p_type == "wrapper.read_back_verify":
@@ -118,8 +131,12 @@ class PatchedToolRegistry:
             if is_unclear:
                 verified = self._verify_specific_refund(order_id, amount, stable_key)
                 if verified:
+                    self._last_unresolved_op_by_order.pop(order_id, None)
                     return verified
+                self._last_unresolved_op_by_order[order_id] = op_id
                 return {"status": "error", "error": "timeout", "verified_by_readback": False, "effect_applied": False}
+            if resp.get("status") == "ok":
+                self._last_unresolved_op_by_order.pop(order_id, None)
             return resp
 
         # 5. Wrapper: retry_policy
@@ -129,8 +146,12 @@ class PatchedToolRegistry:
             if is_unclear:
                 verified = self._verify_specific_refund(order_id, amount, stable_key)
                 if verified:
+                    self._last_unresolved_op_by_order.pop(order_id, None)
                     return verified
+                self._last_unresolved_op_by_order[order_id] = op_id
                 return {"status": "error", "error": "timeout", "verified_by_readback": False, "effect_applied": False}
+            if resp.get("status") == "ok":
+                self._last_unresolved_op_by_order.pop(order_id, None)
             return resp
 
         # 6. Combo: idempotency_key + read_back_verify
@@ -140,8 +161,12 @@ class PatchedToolRegistry:
             if is_unclear:
                 verified = self._verify_specific_refund(order_id, amount, stable_key)
                 if verified:
+                    self._last_unresolved_op_by_order.pop(order_id, None)
                     return verified
+                self._last_unresolved_op_by_order[order_id] = op_id
                 return {"status": "error", "error": "timeout", "verified_by_readback": False, "effect_applied": False}
+            if resp.get("status") == "ok":
+                self._last_unresolved_op_by_order.pop(order_id, None)
             return resp
 
         return self.raw.issue_refund(order_id, amount, idempotency_key=stable_key, operation_id=op_id)
