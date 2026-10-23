@@ -432,7 +432,7 @@
         "patch_id": "patch_retry_policy",
         "name": "State-Checked Retry Policy Wrapper",
         "type": "wrapper.retry_policy",
-        "description": "Checks underlying order balance on timeout before permitting retries.",
+        "description": "Re-checks exact operation completion on timeout before permitting retries.",
         "is_control": false,
         "config": {}
       },
@@ -502,7 +502,7 @@
     "patch_id": "patch_retry_policy",
     "name": "State-Checked Retry Policy Wrapper",
     "type": "wrapper.retry_policy",
-    "description": "Checks underlying order balance on timeout before permitting retries.",
+    "description": "Re-checks exact operation completion on timeout before permitting retries.",
     "is_control": false,
     "config": {}
   },
@@ -615,7 +615,7 @@
     }
   },
   "sample_failing_record": {
-    "run_id": "run_1c3c08c6",
+    "run_id": "run_585db81b",
     "scenario_id": "sc_train_00002",
     "agent_version": "baseline",
     "patch_id": null,
@@ -680,7 +680,7 @@
         "tool": null,
         "args": null,
         "effect": "refund_created",
-        "refund_id": "rf_1e3cb8",
+        "refund_id": "rf_b3fe95",
         "amount": 54.8,
         "observed": null,
         "fault": null,
@@ -758,11 +758,11 @@
       },
       "refunds": [
         {
-          "id": "rf_1e3cb8",
+          "id": "rf_b3fe95",
           "order_id": "2679",
           "amount": 54.8,
           "idempotency_key": null,
-          "created_at": 1792738978.3730757
+          "created_at": 1792739782.2254634
         }
       ]
     },
@@ -781,7 +781,7 @@
     "verification_runs": 300,
     "total_episodes_evaluated": 410,
     "median_seconds_per_episode": 0.0,
-    "measured_wall_clock_sec": 0.187,
+    "measured_wall_clock_sec": 0.2964,
     "speedup_factor": null,
     "note": "Measured in local deterministic simulation mode."
   },

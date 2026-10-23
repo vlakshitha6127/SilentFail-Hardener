@@ -9,8 +9,8 @@ from src.silentfail.models import Scenario, ExpectedOutcome, FaultConfig, PatchS
 from src.silentfail.runner import EpisodeRunner
 
 WINNING_PATCH = PatchSpec(
-    patch_id="patch_custom_winner",
-    name="Custom Hardened Wrapper",
+    patch_id="patch_retry_policy",
+    name="State-Checked Retry Policy Wrapper",
     type="wrapper.retry_policy",
     description="Auto-selected patch passing all 4 regression and legitimate-completion guards."
 )

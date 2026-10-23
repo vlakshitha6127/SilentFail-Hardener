@@ -150,8 +150,6 @@ class PatchedToolRegistry:
 
         return self.raw.issue_refund(order_id, amount, idempotency_key=stable_key, operation_id=op_id)
 
-        return self.raw.issue_refund(order_id, amount, idempotency_key=stable_key, operation_id=op_id)
-
     def send_email(self, to: str, subject: str, body: str) -> Dict[str, Any]:
         return self.raw.send_email(to, subject, body)
 
@@ -185,7 +183,7 @@ def get_default_candidate_patches() -> list[PatchSpec]:
             patch_id="patch_retry_policy",
             name="State-Checked Retry Policy Wrapper",
             type="wrapper.retry_policy",
-            description="Checks underlying order balance on timeout before permitting retries.",
+            description="Re-checks exact operation completion on timeout before permitting retries.",
             is_control=False
         ),
         PatchSpec(

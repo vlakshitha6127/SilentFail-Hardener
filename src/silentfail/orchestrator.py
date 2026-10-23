@@ -128,9 +128,10 @@ class Orchestrator:
             "note": "Measured in local deterministic simulation mode." if not is_cloud_exec else "Measured on remote Nebius endpoint."
         }
 
-        # Step 8: Generate Runnable Pytest Regression Test
-        test_code = self.generate_regression_test_file(winner)
+        # Step 8: Generate and write Runnable Pytest Regression Test
+        test_code = self.render_regression_test_code(winner)
         self.pipeline_state["generated_test_code"] = test_code
+        self.write_regression_test_file(test_code)
         self.pipeline_state["status"] = "completed"
         self.pipeline_state["progress"] = 100
 
@@ -141,7 +142,7 @@ class Orchestrator:
 
         return self.pipeline_state
 
-    def generate_regression_test_file(self, winner: Optional[PatchSpec]) -> str:
+    def render_regression_test_code(self, winner: Optional[PatchSpec]) -> str:
         if not winner:
             return '''"""
 SilentFail Verification Notice: No candidate patch passed all 4 verifier guards.
@@ -152,7 +153,7 @@ No regression test emitted because no safe patch was selected.
         winner_type = winner.type
         winner_name = winner.name
         
-        test_code = f'''"""
+        return f'''"""
 Auto-generated SilentFail Regression Test.
 Guarantees prevention of duplicate refunds after timeouts
 while protecting legitimate repeated partial refunds from over-suppression.
@@ -208,9 +209,14 @@ def test_legitimate_repeat_is_not_oversuppressed():
     assert patched_res["detection"].over_suppression is False
     assert patched_res["is_correct"] is True
 '''
-        # Write to tests/test_generated_regression.py
-        target_path = Path("tests") / "test_generated_regression.py"
-        with open(target_path, "w", encoding="utf-8") as f:
-            f.write(test_code)
 
-        return test_code
+    def write_regression_test_file(self, test_code: str, target_path: Optional[Path] = None) -> Path:
+        target = target_path or (Path(__file__).resolve().parent.parent.parent / "tests" / "test_generated_regression.py")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(test_code)
+        return target
+
+    def generate_regression_test_file(self, winner: Optional[PatchSpec]) -> str:
+        """Backward-compatibility wrapper."""
+        return self.render_regression_test_code(winner)

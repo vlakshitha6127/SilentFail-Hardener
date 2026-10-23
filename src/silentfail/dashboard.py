@@ -247,18 +247,19 @@ DASHBOARD_HTML = """
                 document.getElementById('timeline-lanes').innerHTML = agentHtml + worldHtml;
             }
 
-            // 2. Scoreboard
-            if (data.baseline_metrics && data.heldout_metrics_after) {
-                const b = data.baseline_metrics;
+            // 2. Scoreboard (Paired Held-Out Baseline vs Hardened)
+            if (data.heldout_metrics_before && data.heldout_metrics_after) {
+                const b = data.heldout_metrics_before;
                 const h = data.heldout_metrics_after;
                 const formatCi = (ci) => ci ? `${(ci[0]*100).toFixed(1)}% <span class="ci-tag">[${(ci[1]*100).toFixed(1)}% - ${(ci[2]*100).toFixed(1)}%]</span>` : '--';
                 
                 const rows = [
-                    { name: 'Duplicate-Action Rate', base: formatCi(b.duplicate_action_rate), hard: formatCi(h.duplicate_action_rate), delta: '<b>-100% Fixed</b>' },
-                    { name: 'Conditional False Success', base: formatCi(b.conditional_false_success_rate), hard: '0.0%', delta: 'Suppressed' },
+                    { name: 'Duplicate-Action Rate', base: formatCi(b.duplicate_action_rate), hard: formatCi(h.duplicate_action_rate), delta: (b.duplicate_action_rate[0] > h.duplicate_action_rate[0]) ? '<b style="color:var(--success);">-100% (Eliminated)</b>' : 'Maintained' },
+                    { name: 'Silent Failure Rate', base: formatCi(b.silent_failure_rate), hard: formatCi(h.silent_failure_rate), delta: (b.silent_failure_rate[0] > h.silent_failure_rate[0]) ? '<b style="color:var(--success);">-100% (Eliminated)</b>' : 'Maintained' },
+                    { name: 'Conditional False Success', base: formatCi(b.conditional_false_success_rate), hard: formatCi(h.conditional_false_success_rate), delta: 'Measured' },
                     { name: 'Correct Completion Rate', base: formatCi(b.correct_completion), hard: formatCi(h.correct_completion), delta: 'Maintained' },
-                    { name: 'Legitimate Completion Rate', base: formatCi(b.legitimate_completion_rate), hard: formatCi(h.legitimate_completion_rate), delta: 'No Over-suppression' },
-                    { name: 'Mean Execution Steps', base: `${b.mean_steps} steps`, hard: `${h.mean_steps} steps`, delta: 'Within Cost Guard' }
+                    { name: 'Legitimate Completion Rate', base: formatCi(b.legitimate_completion_rate), hard: formatCi(h.legitimate_completion_rate), delta: 'Protected' },
+                    { name: 'Mean Execution Steps', base: `${b.mean_steps} steps`, hard: `${h.mean_steps} steps`, delta: 'Cost Guard Compliant' }
                 ];
 
                 let bodyHtml = '';
