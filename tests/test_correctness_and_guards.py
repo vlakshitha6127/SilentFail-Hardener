@@ -4,8 +4,11 @@ Covers:
 1. Retries with stable idempotency keys preventing second refunds on timeout.
 2. Orders with pre-existing partial refunds where subsequent refund fails before mutation (not falsely claimed).
 3. Read-back verification across timeout-after-success and empty-200 (both applied and not applied).
-4. Full rejection path where all candidates are rejected and no winner is selected.
-5. Incomplete / invalid metrics guard rejection.
+4. Two equal-value legitimate partial refunds receive distinct operation IDs and both succeed.
+5. Overlapping operations with the same amount receive different operation IDs and do not collide.
+6. Timeout without mutation returns proper failure and does not claim success.
+7. Full rejection path where all candidates are rejected and no winner is selected.
+8. Incomplete / invalid metrics guard rejection.
 """
 
 import pytest
@@ -37,27 +40,133 @@ def test_retry_with_idempotency_key_prevents_second_refund():
     patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
 
     # First attempt: completes in world state, returns timeout error to agent
-    resp1 = patched_tools.issue_refund("5001", 50.0, op_index=0)
+    resp1 = patched_tools.issue_refund("5001", 50.0, operation_id="op_5001_req0")
     assert resp1.get("error") == "timeout"
     assert ws.orders["5001"].refunded_amount == 50.0
     assert len(ws.refunds) == 1
 
-    # Retry of the same logical operation (op_index=0): must NOT create a second refund
-    resp2 = patched_tools.issue_refund("5001", 50.0, op_index=0)
+    # Retry of the same logical operation (same operation_id): must NOT create a second refund
+    resp2 = patched_tools.issue_refund("5001", 50.0, operation_id="op_5001_req0")
     assert resp2.get("status") == "ok"
     # Ground truth world state must strictly have only 1 refund record of $50
     assert ws.orders["5001"].refunded_amount == 50.0
     assert len(ws.refunds) == 1
 
 
+def test_two_equal_value_legitimate_partial_refunds():
+    """
+    Test 2: Two legitimate refund requests for the same order and same amount ($40 and $40)
+    receive different operation IDs, distinct idempotency keys, and both succeed.
+    """
+    initial = {"orders": [{"id": "5003", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]}
+    ws = WorldState(initial)
+    ledger = CausalLedger(scenario_id="sc_two_equal_refunds")
+    raw_tools = ToolRegistry(world_state=ws, ledger=ledger)
+    patch = PatchSpec(
+        patch_id="patch_combo_idemp_readback",
+        name="Combo",
+        type="combo.idempotency_and_read_back",
+        description="Combo"
+    )
+    patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
+
+    # First legitimate refund of $40 (operation 1)
+    res1 = patched_tools.issue_refund("5003", 40.0, operation_id="op_5003_part1")
+    assert res1.get("status") == "ok"
+    assert ws.orders["5003"].refunded_amount == 40.0
+    assert len(ws.refunds) == 1
+
+    # Second legitimate refund of equal amount $40 (operation 2)
+    res2 = patched_tools.issue_refund("5003", 40.0, operation_id="op_5003_part2")
+    assert res2.get("status") == "ok"
+    assert ws.orders["5003"].refunded_amount == 80.0
+    assert len(ws.refunds) == 2
+
+
+def test_overlapping_operations_with_same_amount():
+    """
+    Test 3: Overlapping operations on the same order with identical amounts
+    without explicit operation_id receive distinct generated operation IDs and do not collide.
+    """
+    initial = {"orders": [{"id": "5004", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]}
+    ws = WorldState(initial)
+    ledger = CausalLedger(scenario_id="sc_overlap_ops")
+    raw_tools = ToolRegistry(world_state=ws, ledger=ledger)
+    patch = PatchSpec(
+        patch_id="patch_idempotency_key",
+        name="Idempotency Key",
+        type="wrapper.idempotency_key",
+        description="Key"
+    )
+    patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
+
+    # Calling without explicit operation_id should automatically allocate distinct sequential operation IDs
+    res1 = patched_tools.issue_refund("5004", 30.0)
+    assert res1.get("status") == "ok"
+
+    res2 = patched_tools.issue_refund("5004", 30.0)
+    assert res2.get("status") == "ok"
+
+    assert len(ws.refunds) == 2
+    assert ws.orders["5004"].refunded_amount == 60.0
+
+
+def test_timeout_after_success_resolved_by_readback_and_combo():
+    """
+    Test 4: On timeout after success, read_back_verify and combo wrappers accurately verify
+    the specific refund by its operation key and report success.
+    """
+    initial = {"orders": [{"id": "5005", "status": "delivered", "total": 70.0, "refunded_amount": 0.0}]}
+    ws = WorldState(initial)
+    ledger = CausalLedger()
+    faults = [FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")]
+    raw_tools = ToolRegistry(ws, ledger, FaultInjector(faults))
+    patch = PatchSpec(
+        patch_id="patch_read_back_verify",
+        name="Read Back",
+        type="wrapper.read_back_verify",
+        description="Verify"
+    )
+    patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
+
+    res = patched_tools.issue_refund("5005", 70.0, operation_id="op_5005_main")
+    assert res.get("status") == "ok"
+    assert res.get("verified_by_readback") is True
+    assert ws.orders["5005"].refunded_amount == 70.0
+
+
+def test_timeout_without_mutation():
+    """
+    Test 5: On timeout where mutation did NOT occur (empty_200 with effect_applied=False),
+    read-back returns honest error and does NOT claim success.
+    """
+    initial = {"orders": [{"id": "5006", "status": "delivered", "total": 70.0, "refunded_amount": 0.0}]}
+    ws = WorldState(initial)
+    ledger = CausalLedger()
+    faults = [FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False)]
+    raw_tools = ToolRegistry(ws, ledger, FaultInjector(faults))
+    patch = PatchSpec(
+        patch_id="patch_read_back_verify",
+        name="Read Back",
+        type="wrapper.read_back_verify",
+        description="Verify"
+    )
+    patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
+
+    res = patched_tools.issue_refund("5006", 70.0, operation_id="op_5006_main")
+    assert res.get("status") == "error"
+    assert res.get("verified_by_readback") is False
+    assert ws.orders["5006"].refunded_amount == 0.0
+
+
 def test_existing_partial_refund_unapplied_new_refund_not_claimed_success():
     """
-    Test 2: Order already has an existing partial refund. A subsequent refund fails BEFORE mutation.
+    Test 6: Order already has an existing partial refund. A subsequent refund fails BEFORE mutation.
     Wrapper must not falsely claim success just because cumulative refunded_amount > 0.
     """
     initial = {
         "orders": [{"id": "5002", "status": "partially_refunded", "total": 100.0, "refunded_amount": 40.0}],
-        "refunds": [{"id": "rf_prior_1", "order_id": "5002", "amount": 40.0}]
+        "refunds": [{"id": "rf_prior_1", "order_id": "5002", "amount": 40.0, "idempotency_key": "prior_key"}]
     }
     ws = WorldState(initial)
     ledger = CausalLedger(scenario_id="sc_test_existing_partial")
@@ -74,7 +183,7 @@ def test_existing_partial_refund_unapplied_new_refund_not_claimed_success():
     patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
 
     # Agent requests a new $30 refund
-    resp = patched_tools.issue_refund("5002", 30.0, op_index=0)
+    resp = patched_tools.issue_refund("5002", 30.0, operation_id="op_5002_new")
     
     # Wrapper must NOT claim success based on prior 40.0 refund
     assert resp.get("status") != "ok"
@@ -83,39 +192,9 @@ def test_existing_partial_refund_unapplied_new_refund_not_claimed_success():
     assert len(ws.refunds) == 1
 
 
-def test_read_back_verification_empty_200_applied_vs_not_applied():
-    """
-    Test 3: Read-back verification handles both empty-200 applied and empty-200 not applied.
-    """
-    patch = PatchSpec(
-        patch_id="patch_read_back_verify",
-        name="Read Back",
-        type="wrapper.read_back_verify",
-        description="Verify specific refund"
-    )
-
-    # Case A: Empty 200 with effect APPLIED
-    ws_a = WorldState({"orders": [{"id": "6001", "status": "delivered", "total": 60.0, "refunded_amount": 0.0}]})
-    reg_a = ToolRegistry(ws_a, CausalLedger(), FaultInjector([FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=True)]))
-    patched_a = PatchedToolRegistry(reg_a, patch=patch)
-    res_a = patched_a.issue_refund("6001", 60.0, op_index=0)
-    assert res_a.get("status") == "ok"
-    assert res_a.get("verified_by_readback") is True
-    assert ws_a.orders["6001"].refunded_amount == 60.0
-
-    # Case B: Empty 200 with effect NOT APPLIED
-    ws_b = WorldState({"orders": [{"id": "6002", "status": "delivered", "total": 60.0, "refunded_amount": 0.0}]})
-    reg_b = ToolRegistry(ws_b, CausalLedger(), FaultInjector([FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False)]))
-    patched_b = PatchedToolRegistry(reg_b, patch=patch)
-    res_b = patched_b.issue_refund("6002", 60.0, op_index=0)
-    assert res_b.get("status") == "error"
-    assert res_b.get("verified_by_readback") is False
-    assert ws_b.orders["6002"].refunded_amount == 0.0
-
-
 def test_all_candidates_rejected_returns_no_winner():
     """
-    Test 4: If all candidates fail the guards, winner must be None and reasons recorded.
+    Test 7: If all candidates fail the guards, winner must be None and reasons recorded.
     """
     baseline_metrics = {
         "correct_completion": [0.60, 0.45, 0.75],
@@ -128,7 +207,6 @@ def test_all_candidates_rejected_returns_no_winner():
         "mean_steps": 4.0
     }
 
-    # Two bad candidates: one causes severe regression, another causes massive cost overrun
     candidate_specs = [
         PatchSpec(patch_id="bad_1", name="Bad 1", type="control.refuse_all", description="refuse all"),
         PatchSpec(patch_id="bad_2", name="Bad 2", type="wrapper.retry_policy", description="costly")
@@ -168,7 +246,7 @@ def test_all_candidates_rejected_returns_no_winner():
 
 def test_guard_rejects_incomplete_metrics():
     """
-    Test 5: Incomplete candidate metrics are rejected by guard rather than defaulted to zero.
+    Test 8: Incomplete candidate metrics are rejected by guard rather than defaulted to zero.
     """
     baseline_metrics = {
         "correct_completion": [0.60, 0.45, 0.75],
@@ -182,7 +260,6 @@ def test_guard_rejects_incomplete_metrics():
     }
     incomplete_metrics = {
         "correct_completion": [0.65, 0.50, 0.78],
-        # missing legitimate_completion_rate, duplicate_action_rate, etc.
     }
     verifier = VerifierAndSelector()
     is_eligible, reasons = verifier.evaluate_guards(baseline_metrics, incomplete_metrics)

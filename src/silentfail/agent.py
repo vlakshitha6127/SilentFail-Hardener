@@ -108,7 +108,8 @@ class NaiveRefundAgent:
         total_refunded_claimed = 0.0
 
         for op_idx, amt in enumerate(refund_amounts):
-            # Naive retry loop: tries up to max_retries on error/timeout
+            # Unique operation ID per logical refund request
+            logical_op_id = f"op_{order_id}_req{op_idx}"
             attempts = 0
             success = False
             last_resp = None
@@ -117,10 +118,10 @@ class NaiveRefundAgent:
                 attempts += 1
                 step_count += 1
                 tool_call_count += 1
-                transcript.append({"step": step_count, "action": "call issue_refund", "args": {"order_id": order_id, "amount": amt}})
+                transcript.append({"step": step_count, "action": "call issue_refund", "args": {"order_id": order_id, "amount": amt, "operation_id": logical_op_id}})
                 
-                # Pass op_index to enable stable logical operation identification across retries
-                resp = tools.issue_refund(order_id, amt, op_index=op_idx)
+                # Pass operation_id so all retries reuse the same logical operation identity
+                resp = tools.issue_refund(order_id, amt, operation_id=logical_op_id, op_index=op_idx)
                 transcript.append({"step": step_count, "observation": resp})
                 tokens_in += 120
                 tokens_out += 40
