@@ -615,7 +615,7 @@
     }
   },
   "sample_failing_record": {
-    "run_id": "run_76e40484",
+    "run_id": "run_530b00bc",
     "scenario_id": "sc_train_00002",
     "agent_version": "baseline",
     "patch_id": null,
@@ -680,7 +680,7 @@
         "tool": null,
         "args": null,
         "effect": "refund_created",
-        "refund_id": "rf_db5f82",
+        "refund_id": "rf_c0135f",
         "amount": 54.8,
         "observed": null,
         "fault": null,
@@ -758,11 +758,11 @@
       },
       "refunds": [
         {
-          "id": "rf_db5f82",
+          "id": "rf_c0135f",
           "order_id": "2679",
           "amount": 54.8,
           "idempotency_key": null,
-          "created_at": 1792737234.4764102
+          "created_at": 1792738717.3999896
         }
       ]
     },
@@ -781,7 +781,7 @@
     "verification_runs": 300,
     "total_episodes_evaluated": 410,
     "median_seconds_per_episode": 0.0,
-    "measured_wall_clock_sec": 0.2009,
+    "measured_wall_clock_sec": 0.1848,
     "speedup_factor": null,
     "note": "Measured in local deterministic simulation mode."
   },

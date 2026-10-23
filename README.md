@@ -111,11 +111,11 @@ Open [http://localhost:8000](http://localhost:8000) in your browser:
 | **Legitimate Completion Rate** | **77.8%** (7/9) [45.3% - 93.7%] | **77.8%** (7/9) [45.3% - 93.7%] | **Maintained (Over-Suppression Guard passed)** |
 | **Mean Execution Steps** | 2.93 steps | 2.90 steps | **Cost Guard Compliant** |
 
-### Implemented Verifier Guards
-The verifier deterministically evaluates candidates using implemented check routines:
-1. **Incomplete/Missing Metrics Guard**: Rejects malformed metrics before candidate evaluation.
+### Implemented Verifier Guards (Evaluation Engine)
+*Note: These represent the 8 distinct analytical guards enforced by the Verifier during candidate selection (`runner.py`), separate from the 21 automated unit/integration tests executed by `pytest`:*
+1. **Incomplete/Missing Metrics Guard**: Rejects malformed or incomplete candidate metrics before evaluation.
 2. **Regression Guard**: Protects against drops in baseline task completion rate beyond tolerance.
-3. **Legitimate-Completion Guard**: Protects valid multi-item/partial refunds and no-fault actions.
+3. **Legitimate-Completion Guard**: Protects valid multi-item/partial refunds and no-fault actions against refusal.
 4. **Duplicate-Action Guard**: Enforces non-increasing duplicate refund rates.
 5. **False-Success Claim Guard**: Enforces non-increasing silent failure claims.
 6. **Missed-Action Guard**: Caps omission rate increases.

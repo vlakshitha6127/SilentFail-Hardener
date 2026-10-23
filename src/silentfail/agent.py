@@ -193,15 +193,15 @@ class NaiveRefundAgent:
                 "type": "function",
                 "function": {
                     "name": "issue_refund",
-                    "description": "Issue refund for an order. Pass operation_id to uniquely identify this logical refund request; reuse the exact same operation_id on retries of that request.",
+                    "description": "Issue refund for an order. MUST supply operation_id to uniquely identify this logical refund request; retries MUST reuse the exact same operation_id, while distinct refund requests MUST use different operation_ids.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "order_id": {"type": "string", "description": "The order ID to refund"},
                             "amount": {"type": "number", "description": "The amount to refund"},
-                            "operation_id": {"type": "string", "description": "Unique identifier for this specific refund operation. Retries MUST pass the same operation_id; independent refunds MUST use distinct operation_ids."}
+                            "operation_id": {"type": "string", "description": "Required unique identifier for this specific refund operation. Retries MUST pass the same operation_id; independent refunds MUST use distinct operation_ids."}
                         },
-                        "required": ["order_id", "amount"]
+                        "required": ["order_id", "amount", "operation_id"]
                     }
                 }
             },
@@ -294,11 +294,19 @@ class NaiveRefundAgent:
                 if fn_name == "get_order":
                     tool_res = tools.get_order(str(fn_args.get("order_id")))
                 elif fn_name == "issue_refund":
-                    tool_res = tools.issue_refund(
-                        order_id=str(fn_args.get("order_id")),
-                        amount=float(fn_args.get("amount", 0)),
-                        operation_id=fn_args.get("operation_id")
-                    )
+                    op_id = fn_args.get("operation_id")
+                    if not op_id:
+                        tool_res = {
+                            "status": "error",
+                            "error": "missing_operation_id",
+                            "message": "operation_id is required for issue_refund to guarantee idempotency and avoid duplicate charges."
+                        }
+                    else:
+                        tool_res = tools.issue_refund(
+                            order_id=str(fn_args.get("order_id")),
+                            amount=float(fn_args.get("amount", 0)),
+                            operation_id=str(op_id)
+                        )
                 elif fn_name == "send_email":
                     tool_res = tools.send_email(str(fn_args.get("to")), str(fn_args.get("subject")), str(fn_args.get("body")))
                 elif fn_name == "create_ticket":

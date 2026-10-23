@@ -328,3 +328,105 @@ def test_generated_regression_test_handles_winner_and_no_winner():
     code_no_winner = orch.generate_regression_test_file(None)
     assert "No candidate patch passed all 4 verifier guards" in code_no_winner
     assert "patch_id=" not in code_no_winner
+
+
+def test_timeout_before_refund_is_applied():
+    """
+    Focused Test: Timeout occurs before mutation happens (e.g. empty_200 with effect_applied=False or timeout on upstream).
+    Hardened wrapper must NOT report success, and world state must remain unmutated.
+    """
+    initial = {"orders": [{"id": "8001", "status": "delivered", "total": 50.0, "refunded_amount": 0.0}]}
+    ws = WorldState(initial)
+    ledger = CausalLedger()
+    faults = [FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False)]
+    raw_tools = ToolRegistry(ws, ledger, FaultInjector(faults))
+    patch = PatchSpec(
+        patch_id="patch_read_back_verify",
+        name="Read Back",
+        type="wrapper.read_back_verify",
+        description="Verify"
+    )
+    patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
+
+    res = patched_tools.issue_refund("8001", 50.0, operation_id="op_8001_unapplied")
+    assert res.get("status") == "error"
+    assert res.get("verified_by_readback") is False
+    assert ws.orders["8001"].refunded_amount == 0.0
+    assert len(ws.refunds) == 0
+
+
+def test_existing_refund_with_same_amount_different_operation_id():
+    """
+    Focused Test: Order has a pre-existing refund of $35 with operation ID 'prior_op_1'.
+    A new request comes in for the same amount $35 with operation ID 'new_op_2' and fails before mutation.
+    Read-back verification MUST NOT treat the prior $35 refund as proof that 'new_op_2' succeeded.
+    """
+    initial = {
+        "orders": [{"id": "8002", "status": "partially_refunded", "total": 100.0, "refunded_amount": 35.0}],
+        "refunds": [{"id": "rf_prior_1", "order_id": "8002", "amount": 35.0, "idempotency_key": "idem_prior_op_1"}]
+    }
+    ws = WorldState(initial)
+    ledger = CausalLedger()
+    faults = [FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False)]
+    raw_tools = ToolRegistry(ws, ledger, FaultInjector(faults))
+    patch = PatchSpec(
+        patch_id="patch_combo_idemp_readback",
+        name="Combo",
+        type="combo.idempotency_and_read_back",
+        description="Combo"
+    )
+    patched_tools = PatchedToolRegistry(raw_tools, patch=patch)
+
+    # New request with distinct operation_id 'new_op_2'
+    res = patched_tools.issue_refund("8002", 35.0, operation_id="new_op_2")
+    assert res.get("status") == "error"
+    assert res.get("verified_by_readback") is False
+    assert ws.orders["8002"].refunded_amount == 35.0
+    assert len(ws.refunds) == 1
+
+
+def test_missing_operation_id_in_llm_tool_call_path():
+    """
+    Focused Test: An LLM tool-call invoking issue_refund without an operation_id
+    is cleanly rejected with an explicit error requiring operation_id to prevent duplicates.
+    """
+    ws = WorldState({"orders": [{"id": "8003", "status": "delivered", "total": 60.0, "refunded_amount": 0.0}]})
+    ledger = CausalLedger()
+    raw_tools = ToolRegistry(ws, ledger)
+    
+    agent = NaiveRefundAgent()
+    # Mock LLM response that calls issue_refund without operation_id
+    class DummyChoice:
+        class Msg:
+            content = None
+            tool_calls = [
+                type("TC", (), {
+                    "id": "tc_1",
+                    "function": type("FN", (), {
+                        "name": "issue_refund",
+                        "arguments": '{"order_id": "8003", "amount": 60.0}'
+                    })()
+                })()
+            ]
+            def model_dump(self):
+                return {"role": "assistant", "content": None, "tool_calls": [{"id": "tc_1"}]}
+        choices = [type("Choice", (), {"message": Msg()})()]
+        usage = None
+
+    class MockModelClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    return DummyChoice()
+
+    agent.model_client = MockModelClient()
+    res = agent._run_llm("Refund order 8003", raw_tools, config={"max_steps": 1})
+    
+    # Check that tool response in transcript reported missing_operation_id
+    tool_responses = [t["tool_response"] for t in res.transcript if "tool_response" in t]
+    assert len(tool_responses) == 1
+    assert tool_responses[0]["status"] == "error"
+    assert tool_responses[0]["error"] == "missing_operation_id"
+    assert "operation_id is required" in tool_responses[0]["message"]
+
