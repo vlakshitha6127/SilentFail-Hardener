@@ -171,10 +171,24 @@ def test_candidate_provenance_programmatically():
         actual_hash = hashlib.sha256(p.read_bytes()).hexdigest()
         assert actual_hash == expected_hash, f"Source file hash mismatch for {path_str}"
 
-    # 2. Working tree diff sha256
-    diff_bytes = subprocess.run(["git", "diff"], capture_output=True, cwd=str(REPO_ROOT)).stdout
+    # 2. Evaluated diff sha256 against recorded base commit:
+    # When evaluated, candidate changes were in a dirty working tree over base_commit (63d3e97).
+    # Since commit 31f850c, those changes are committed into immutable Git history.
+    # Reconstruct the exact diff between base_commit and commit 31f850c for the tracked files.
+    base_commit = prov["base_commit"]
+    candidate_commit = "31f850c1224abf5991cd3b29b543eb1a52a21946"
+    tracked_files = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", base_commit],
+        capture_output=True,
+        cwd=str(REPO_ROOT)
+    ).stdout.decode().splitlines()
+    diff_bytes = subprocess.run(
+        ["git", "diff", base_commit, candidate_commit, "--"] + tracked_files,
+        capture_output=True,
+        cwd=str(REPO_ROOT)
+    ).stdout
     actual_diff_sha256 = hashlib.sha256(diff_bytes).hexdigest()
-    assert actual_diff_sha256 == prov["working_tree_diff_sha256"], "Working tree diff hash mismatch"
+    assert actual_diff_sha256 == prov["working_tree_diff_sha256"], "Evaluated diff hash mismatch against base commit"
 
     # 3. Scenario suite hashes
     gen = ScenarioGenerator(base_seed=prov["scenario_suite_config"]["base_seed"])
