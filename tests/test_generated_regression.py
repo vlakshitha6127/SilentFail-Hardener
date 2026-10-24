@@ -26,7 +26,7 @@ def test_regression_timeout_duplicate_failure_cured():
         split="held_out",
         category="timeout_after_success",
         initial_state={"orders": [{"id": "8812", "status": "delivered", "total": 85.0, "refunded_amount": 0.0}]},
-        customer_message="Please refund order 8812, package arrived broken.",
+        customer_message="Please refund $42.50 for order 8812, package arrived broken.",
         faults=[FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")],
         expected_outcome=ExpectedOutcome(refund_count=1, refund_total=42.5, email_count=1)
     )

@@ -582,7 +582,7 @@ def test_agent_pre_mutation_fault_then_timeout_end_to_end():
         split="held_out",
         category="compound_faults",
         initial_state={"orders": [{"id": "8812", "status": "delivered", "total": 85.0, "refunded_amount": 0.0}]},
-        customer_message="Please refund order 8812, package arrived broken.",
+        customer_message="Please refund $42.50 for order 8812, package arrived broken.",
         faults=[
             FaultConfig(tool="issue_refund", call_index=0, type="empty_200", effect_applied=False),
             FaultConfig(tool="issue_refund", call_index=1, type="timeout_after_success"),

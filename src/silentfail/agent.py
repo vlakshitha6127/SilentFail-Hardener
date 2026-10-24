@@ -94,15 +94,53 @@ class NaiveRefundAgent:
             final_msg = f"Order {order_id} has already been fully refunded. No additional refund can be issued."
             return AgentResult(final_message=final_msg, transcript=transcript, terminated="completed", cost=ExecutionCost(tokens_in=tokens_in, tokens_out=tokens_out, tool_calls=tool_call_count, steps=step_count))
 
-        # Determine refund amounts to issue
+        # Determine refund amounts to issue based on customer intent and remaining balance
         refund_amounts = []
         if is_two_partial_refunds:
-            half = round(total_amount / 2, 2)
-            rem = round(total_amount - half, 2)
+            # Multi-item / legitimate repeat requests: split into two distinct partial refunds
+            half = round(remaining / 2, 2)
+            rem = round(remaining - half, 2)
             refund_amounts = [half, rem]
         else:
-            # Naive single refund requests standard full or partial amount
-            refund_amounts = [round(total_amount / 2, 2) if total_amount >= 50 else total_amount]
+            # 1. Explicit partial amount specified in message (e.g. "$40", "$42.50", "refund of $15", "refund 40 dollars", "40 dollars")
+            # Strict boundary parsing: ensure order IDs (e.g. "order 1234") are never parsed as dollar amounts.
+            # When refund/amount is explicitly associated with a number, prioritize that specific refund amount.
+            explicit_amount = None
+
+            # First priority: check for explicit refund targeted amount (e.g., "refund $40", "refund of $40", "refund 40 dollars")
+            targeted_refund_match = re.search(
+                r"\b(?:refund|amount)\s+(?:of\s+)?(?:(?:\$\s*(\d+(?:\.\d+)?))|(?:(\d+(?:\.\d+)?)\s*(?:dollars?|bucks?|\$)?))\b",
+                msg_lower
+            )
+            if targeted_refund_match:
+                cand_str = targeted_refund_match.group(1) or targeted_refund_match.group(2)
+                if cand_str and cand_str != order_id:
+                    cand_val = float(cand_str)
+                    if 0 < cand_val <= remaining:
+                        explicit_amount = cand_val
+
+            # Second priority: any explicit currency amount (e.g., "$42.50" or "40 dollars")
+            if explicit_amount is None:
+                dollar_matches = re.finditer(
+                    r"(?:\$\s*(\d+(?:\.\d+)?))|(?:\b(\d+(?:\.\d+)?)\s*(?:dollars?|bucks?)\b)",
+                    msg_lower
+                )
+                for dm in dollar_matches:
+                    candidate_num = dm.group(1) or dm.group(2)
+                    if candidate_num and candidate_num != order_id:
+                        candidate_amt = float(candidate_num)
+                        if 0 < candidate_amt <= remaining:
+                            explicit_amount = candidate_amt
+                            break
+
+            if explicit_amount is not None:
+                refund_amounts = [explicit_amount]
+            else:
+                # 2. General refund request: the existing scenario contract defines general requests
+                # as full refund requests. Honor full remaining eligible balance.
+                # Documented ambiguous behavior: when no explicit amount is requested (or if requested
+                # amount exceeds remaining balance), do not invent a partial amount. Refund the full eligible balance.
+                refund_amounts = [remaining]
 
         refunds_successful = 0
         total_refunded_claimed = 0.0

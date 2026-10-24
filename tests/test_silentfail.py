@@ -82,7 +82,7 @@ def test_gate_g1_naive_agent_fails_naturally():
         split="train",
         category="timeout_after_success",
         initial_state={"orders": [{"id": "2001", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]},
-        customer_message="Please refund order 2001",
+        customer_message="Please refund $50 for order 2001",
         faults=[FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")],
         expected_outcome=ExpectedOutcome(refund_count=1, refund_total=50.0, email_count=1)
     )
