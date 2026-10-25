@@ -14,6 +14,7 @@ import os
 import json
 import time
 import re
+from urllib.parse import urlsplit
 from typing import Dict, Any, Optional, List, Tuple
 from pydantic import BaseModel
 try:
@@ -47,10 +48,25 @@ def sanitize_error_message(err: Any, sensitive_tokens: Optional[List[str]] = Non
 
     # Redact common credential patterns (Bearer tokens, Authorization headers, api_key=...)
     err_str = re.sub(r"(Bearer\s+)[A-Za-z0-9_\-\.]{8,}", r"\1[REDACTED_TOKEN]", err_str, flags=re.IGNORECASE)
-    err_str = re.sub(r"((?:api[_-]?key|password|secret|authorization)\s*[:=]\s*['\"]?)[A-Za-z0-9_\-\.]{8,}(['\"]?)", r"\1[REDACTED_CREDENTIAL]\2", err_str, flags=re.IGNORECASE)
+    err_str = re.sub(r"((?:api[_-]?key|token|password|secret|authorization)\s*[:=]\s*['\"]?)[A-Za-z0-9_\-\.]{4,}(['\"]?)", r"\1[REDACTED_CREDENTIAL]\2", err_str, flags=re.IGNORECASE)
     err_str = re.sub(r"(v1\.[A-Za-z0-9_\-]{20,})", "[REDACTED_TOKEN_FACTORY_KEY]", err_str)
 
     return f"{type(err).__name__}: {err_str}"
+
+
+def safe_endpoint_label(url: str) -> str:
+    """Return an endpoint label without userinfo, query strings, or fragments."""
+    try:
+        parsed = urlsplit(url)
+        if not parsed.scheme or not parsed.hostname:
+            return "[configured endpoint]"
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{host}{port}{parsed.path}".rstrip("/")
+    except ValueError:
+        return "[configured endpoint]"
 
 # Allowed patch types matching PatchSpec Literal in models.py
 ALLOWED_PATCH_TYPES = {
@@ -135,14 +151,23 @@ class NebiusClient:
         Never fabricates latency or throughput on local simulation fallback.
         """
         if not self.is_live or not self.client:
+            configured = bool(self.api_key and self.api_key != "your_nebius_or_nvidia_api_key_here")
             return {
-                "status": "local_simulation",
+                "status": "live_provider_unavailable" if configured else "local_simulation",
                 "connected": False,
-                "reason": "NEBIUS_API_KEY not configured or offline. Running on local simulation engine.",
-                "endpoint": self.base_url,
+                "reason": (
+                    "Live provider configured but its client could not be initialized."
+                    if configured
+                    else "NEBIUS_API_KEY not configured. Running on local simulation engine."
+                ),
+                "endpoint": safe_endpoint_label(self.base_url),
                 "measured_rps": None,
                 "latency_ms": None,
-                "note": "Local deterministic simulation mode; remote Nebius call was not performed."
+                "note": (
+                    "Deterministic local simulation mode; live provider was not verified."
+                    if configured
+                    else "Local deterministic simulation mode; remote call was not performed."
+                )
             }
 
         t0 = time.time()
@@ -164,13 +189,13 @@ class NebiusClient:
             }
         except Exception as e:
             return {
-                "status": "local_simulation",
+                "status": "live_provider_error",
                 "connected": False,
-                "reason": f"Remote Nebius endpoint error: {str(e)}. Operating in local simulation mode.",
-                "endpoint": self.base_url,
+                "reason": f"Remote provider probe failed: {sanitize_error_message(e, [self.api_key])}.",
+                "endpoint": safe_endpoint_label(self.base_url),
                 "measured_rps": None,
                 "latency_ms": None,
-                "note": "Local deterministic simulation mode; remote Nebius call failed."
+                "note": "Deterministic local simulation remains available; live provider was not verified."
             }
 
     def diagnose_and_propose_patches(self, failing_ledgers: List[Dict[str, Any]]) -> Tuple[List[PatchSpec], Dict[str, Any]]:
