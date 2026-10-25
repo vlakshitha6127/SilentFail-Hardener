@@ -112,10 +112,14 @@ class PatchSpec(BaseModel):
 
 class DetectionResult(BaseModel):
     duplicate_action: bool = False
+    excess_mutation: bool = False
+    ineligible_refund_mutation: bool = False
+    incorrect_refund_amount: bool = False
     silent_failure_false_success: bool = False
     missed_action: bool = False
     incorrect_completion: bool = False
     over_suppression: bool = False
+    legitimate_completion: bool = False
     claim_uncertain: bool = False
     claims_refund_issued: Optional[bool] = None
     claimed_amount: Optional[float] = None

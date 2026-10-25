@@ -25,3 +25,15 @@ data/ledgers/
 data/runs/
 *.log
 .DS_Store
+
+# Generated evaluation evidence and temporary run outputs
+artifacts/offline_pilot/
+tmp/
+temp/
+runs/
+outputs/
+evaluation_outputs/
+
+# Local session and tool state
+.copilot/
+.claude/

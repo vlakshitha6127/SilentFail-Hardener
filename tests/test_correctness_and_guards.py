@@ -12,7 +12,7 @@ Covers:
 """
 
 import pytest
-from src.silentfail.models import Scenario, ExpectedOutcome, FaultConfig, PatchSpec
+from src.silentfail.models import Scenario, ExpectedOutcome, FaultConfig, PatchSpec, ExecutionCost
 from src.silentfail.ledger import WorldState, CausalLedger
 from src.silentfail.tools import ToolRegistry, FaultInjector
 from src.silentfail.agent import NaiveRefundAgent
@@ -538,9 +538,107 @@ def test_fault_scheduled_on_idempotent_replay_is_not_observed():
     r2 = tools.issue_refund("8006", 45.0, operation_id="op_x")
     assert r1 == {"error": "timeout"}
     assert r2["status"] == "ok"
-    assert raw.fault_injector.call_counters["issue_refund"] == 2
+    assert raw.fault_injector.call_counters["issue_refund"] == 1
     assert len(ws.refunds) == 1
     assert ws.orders["8006"].refunded_amount == 45.0
+
+
+def test_idempotent_replay_does_not_consume_next_fault():
+    """A cached replay leaves the next distinct operation's scheduled fault untouched."""
+    ws = WorldState({"orders": [{"id": "8008", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]})
+    faults = [FaultConfig(tool="issue_refund", call_index=1, type="empty_200", effect_applied=False)]
+    tools, raw, _ = _patched("patch_idempotency_key", "wrapper.idempotency_key", ws, faults)
+
+    first = tools.issue_refund("8008", 40.0, operation_id="op_first")
+    replay = tools.issue_refund("8008", 40.0, operation_id="op_first")
+    second = tools.issue_refund("8008", 20.0, operation_id="op_second")
+
+    assert first["status"] == "ok"
+    assert replay["refund_id"] == first["refund_id"]
+    assert second["status"] == 200 and second["data"] is None
+    assert len(ws.refunds) == 1
+    assert raw.fault_injector.call_counters["issue_refund"] == 2
+
+
+def test_excess_ineligible_mutation_is_not_duplicate_retry():
+    """An ineligible mutation with one operation is excess, but not a retry duplicate."""
+    scenario = Scenario(
+        scenario_id="sc_ineligible_single_mutation",
+        category="ineligible_already_refunded",
+        initial_state={"orders": [{"id": "8010", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]},
+        customer_message="Please refund $150 for order 8010.",
+        expected_outcome=ExpectedOutcome(refund_count=0, refund_total=0.0, allow_refusal=True),
+    )
+    result = EpisodeRunner.run_episode(scenario)
+    detection = result["detection"]
+
+    assert result["record"].final_state["refund_count"] == 1
+    assert detection.excess_mutation is True
+    assert detection.ineligible_refund_mutation is True
+    assert detection.duplicate_action is False
+
+
+@pytest.mark.parametrize("message", [
+    'Please refund $50 for order 1234.',
+    'Please refund $42.50 for order 1234.',
+    r'Please refund order 1234; customer said "box\\label".',
+    'Please refund $42.50 for order ORD-1234; note "box\\\\label".',
+])
+def test_customer_message_transport_preserves_literal_text(message):
+    """The local runner passes scenario text directly, without shell interpolation."""
+    received = {}
+
+    class CapturingAgent:
+        def run(self, user_message, tools, config=None):
+            received["message"] = user_message
+            return type("Result", (), {
+                "final_message": "No refund requested.",
+                "cost": ExecutionCost(),
+            })()
+
+    scenario = Scenario(
+        scenario_id="sc_message_transport",
+        category="no_fault_control",
+        initial_state={"orders": [{"id": "1234", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]},
+        customer_message=message,
+        expected_outcome=ExpectedOutcome(allow_refusal=True),
+    )
+    EpisodeRunner.run_episode(scenario, agent=CapturingAgent())
+    assert received["message"] == message
+
+
+def test_selector_tie_break_uses_measured_secondary_metrics_not_type_length():
+    baseline = {
+        "correct_completion": [0.80, 0.7, 0.9],
+        "legitimate_completion_rate": [0.80, 0.7, 0.9],
+        "duplicate_action_rate": [0.20, 0.1, 0.3],
+        "silent_failure_rate": [0.10, 0.05, 0.2],
+        "missed_action_rate": [0.10, 0.05, 0.2],
+        "incorrect_completion_rate": [0.20, 0.1, 0.3],
+        "over_suppression_rate": [0.0, 0.0, 0.0],
+        "mean_steps": 4.0,
+    }
+    specs = [
+        PatchSpec(patch_id="short", name="Short", type="wrapper.idempotency_key", description="x"),
+        PatchSpec(patch_id="long", name="Long", type="combo.idempotency_and_read_back", description="x"),
+    ]
+    common = {
+        "correct_completion": [0.90, 0.8, 0.95],
+        "duplicate_action_rate": [0.10, 0.05, 0.2],
+        "silent_failure_rate": [0.05, 0.02, 0.1],
+        "missed_action_rate": [0.05, 0.02, 0.1],
+        "incorrect_completion_rate": [0.10, 0.05, 0.2],
+        "over_suppression_rate": [0.0, 0.0, 0.0],
+        "mean_steps": 4.0,
+    }
+    candidates = {
+        "short": {**common, "legitimate_completion_rate": [0.80, 0.7, 0.9]},
+        "long": {**common, "legitimate_completion_rate": [0.90, 0.8, 0.95]},
+    }
+
+    winner, _ = VerifierAndSelector().select_winner(baseline, candidates, specs)
+    assert winner is not None
+    assert winner.patch_id == "long"
 
 
 @pytest.mark.parametrize("patch_id,patch_type", [
@@ -630,5 +728,4 @@ def test_legitimate_successful_completion_and_error_recovery():
     assert "error" in res_invalid
     assert ws.orders["8005"].refunded_amount == 30.0
     assert len(ws.refunds) == 1
-
 

@@ -51,14 +51,14 @@ class ToolRegistry:
         # Apply fault if any
         if fault and fault.type == "timeout_after_success":
             observed = {"error": "timeout"}
-            self.ledger.record_tool_response(observed, fault="timeout_after_success")
+            self.ledger.record_tool_response(observed, fault="timeout_after_success", tool="get_order")
             return observed
         elif fault and fault.type == "empty_200":
             observed = {"status": 200, "data": None}
-            self.ledger.record_tool_response(observed, fault="empty_200")
+            self.ledger.record_tool_response(observed, fault="empty_200", tool="get_order")
             return observed
             
-        self.ledger.record_tool_response(real_result)
+        self.ledger.record_tool_response(real_result, tool="get_order")
         return real_result
 
     def issue_refund(
@@ -75,26 +75,26 @@ class ToolRegistry:
             "idempotency_key": idempotency_key,
             "operation_id": operation_id
         })
-        fault = self.fault_injector.get_fault_for_call("issue_refund")
-        
         # Idempotency check at tool layer (if caller supplied a key)
         if idempotency_key and idempotency_key in self._refund_key_cache:
             cached_result = self._refund_key_cache[idempotency_key]
             # No world mutation performed for duplicate key!
-            self.ledger.record_tool_response(cached_result)
+            self.ledger.record_tool_response(cached_result, tool="issue_refund")
             return cached_result
+
+        fault = self.fault_injector.get_fault_for_call("issue_refund")
 
         # Determine real effect
         order = self.world_state.orders.get(str(order_id))
         if not order:
             err = {"error": f"Order {order_id} not found"}
-            self.ledger.record_tool_response(err)
+            self.ledger.record_tool_response(err, tool="issue_refund")
             return err
             
         remaining_balance = round(order.total - order.refunded_amount, 2)
         if amount > remaining_balance or remaining_balance <= 0:
             err = {"error": "Order already fully refunded or requested amount exceeds remaining balance", "remaining_balance": remaining_balance}
-            self.ledger.record_tool_response(err)
+            self.ledger.record_tool_response(err, tool="issue_refund")
             return err
 
         # Check fault conditions that suppress mutation
@@ -112,7 +112,17 @@ class ToolRegistry:
             else:
                 order.status = "partially_refunded"
                 
-            self.ledger.record_world_mutation("refund_created", details={"order_id": order_id, "amount": amount}, refund_id=ref_id, amount=amount)
+            self.ledger.record_world_mutation(
+                "refund_created",
+                details={
+                    "order_id": order_id,
+                    "amount": amount,
+                    "operation_id": operation_id,
+                    "idempotency_key": idempotency_key,
+                },
+                refund_id=ref_id,
+                amount=amount,
+            )
             real_result = {"status": "ok", "refund_id": ref_id, "amount": amount, "order_id": order_id}
             if idempotency_key:
                 self._refund_key_cache[idempotency_key] = real_result
@@ -123,18 +133,18 @@ class ToolRegistry:
         if fault:
             if fault.type == "timeout_after_success":
                 observed = {"error": "timeout"}
-                self.ledger.record_tool_response(observed, fault="timeout_after_success")
+                self.ledger.record_tool_response(observed, fault="timeout_after_success", tool="issue_refund")
                 return observed
             elif fault.type == "empty_200":
                 observed = {"status": 200, "data": None}
-                self.ledger.record_tool_response(observed, fault="empty_200")
+                self.ledger.record_tool_response(observed, fault="empty_200", tool="issue_refund")
                 return observed
             elif fault.type == "duplicate_webhook":
                 observed = {"status": "ok", "refund_id": real_result.get("refund_id"), "event": "webhook.refund.completed"}
-                self.ledger.record_tool_response(observed, fault="duplicate_webhook")
+                self.ledger.record_tool_response(observed, fault="duplicate_webhook", tool="issue_refund")
                 return observed
 
-        self.ledger.record_tool_response(real_result)
+        self.ledger.record_tool_response(real_result, tool="issue_refund")
         return real_result
 
     def send_email(self, to: str, subject: str, body: str) -> Dict[str, Any]:
@@ -157,14 +167,14 @@ class ToolRegistry:
         if fault:
             if fault.type == "timeout_after_success":
                 observed = {"error": "timeout"}
-                self.ledger.record_tool_response(observed, fault="timeout_after_success")
+                self.ledger.record_tool_response(observed, fault="timeout_after_success", tool="send_email")
                 return observed
             elif fault.type == "empty_200":
                 observed = {"status": 200, "data": None}
-                self.ledger.record_tool_response(observed, fault="empty_200")
+                self.ledger.record_tool_response(observed, fault="empty_200", tool="send_email")
                 return observed
 
-        self.ledger.record_tool_response(real_result)
+        self.ledger.record_tool_response(real_result, tool="send_email")
         return real_result
 
     def create_ticket(self, order_id: str, summary: str) -> Dict[str, Any]:
@@ -179,8 +189,8 @@ class ToolRegistry:
         
         if fault and fault.type == "timeout_after_success":
             observed = {"error": "timeout"}
-            self.ledger.record_tool_response(observed, fault="timeout_after_success")
+            self.ledger.record_tool_response(observed, fault="timeout_after_success", tool="create_ticket")
             return observed
 
-        self.ledger.record_tool_response(real_result)
+        self.ledger.record_tool_response(real_result, tool="create_ticket")
         return real_result

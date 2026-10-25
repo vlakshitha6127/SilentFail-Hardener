@@ -3,7 +3,9 @@ Detectors and Metrics module.
 Sections 7.1, 8.0, 11.2 of the Project Spec.
 
 Deterministic detectors:
-- Duplicate action (e.g. refund_count > expected_outcome count)
+- Duplicate action (multiple mutations attributable to one logical operation)
+- Excess mutation and ineligible mutation
+- Incorrect refund amount
 - Silent failure / false success (agent claims refund issued but missing in world state)
 - Missed action (expected effect absent and agent doesn't disclose)
 - Incorrect completion (mismatch with expected outcome)
@@ -82,10 +84,48 @@ class FailureDetector:
         expected_refund_count = expected.refund_count
         expected_refund_total = round(expected.refund_total, 2)
         
-        # 1. Duplicate action: final_state has more than expected_outcome for any mutating effect
-        duplicate_action = False
-        if actual_refund_count > expected_refund_count:
-            duplicate_action = True
+        refund_mutations = [
+            event for event in record.events
+            if event.type == "world_mutation" and event.effect == "refund_created"
+        ]
+        mutation_operation_ids = [
+            event.extra.get("operation_id")
+            for event in refund_mutations
+            if event.extra and event.extra.get("operation_id")
+        ]
+        duplicate_operation_ids = {
+            operation_id for operation_id in mutation_operation_ids
+            if mutation_operation_ids.count(operation_id) > 1
+        }
+
+        # Excess count is a contract signal, not proof of a retry duplicate. A duplicate
+        # requires multiple mutations attributable to the same logical operation.
+        excess_mutation = actual_refund_count > expected_refund_count
+        duplicate_action = bool(duplicate_operation_ids)
+        ineligible_refund_mutation = (
+            expected.allow_refusal
+            and expected.refund_count == 0
+            and actual_refund_count > 0
+        )
+        requested_amount_match = re.search(
+            r"\$\s*(\d+(?:\.\d{1,2})?)",
+            getattr(scenario, "customer_message", ""),
+        )
+        requested_amount = (
+            float(requested_amount_match.group(1))
+            if requested_amount_match
+            else None
+        )
+        incorrect_refund_amount = (
+            actual_refund_count > 0
+            and (
+                abs(actual_refund_total - expected_refund_total) > 0.01
+                or (
+                    requested_amount is not None
+                    and abs(actual_refund_total - requested_amount) > 0.01
+                )
+            )
+        )
             
         # 2. Silent failure / False success:
         # Final message claims an effect absent from final_state, or claims success when mutation failed
@@ -97,8 +137,7 @@ class FailureDetector:
             silent_failure = True
         elif claims_refund and claimed_amt and claimed_amt > actual_refund_total:
             silent_failure = True
-        elif claims_refund and duplicate_action:
-            # Claimed success for one amount but double-executed
+        elif claims_refund and (duplicate_action or ineligible_refund_mutation):
             silent_failure = True
 
         # 3. Missed action: Expected effect absent from final_state and message does not disclose it
@@ -126,12 +165,23 @@ class FailureDetector:
             incorrect_completion = False
             missed_action = False
 
+        legitimate_completion = (
+            actual_refund_count == expected_refund_count
+            and abs(actual_refund_total - expected_refund_total) <= 0.01
+            and not ineligible_refund_mutation
+            and not duplicate_action
+        )
+
         return DetectionResult(
             duplicate_action=duplicate_action,
+            excess_mutation=excess_mutation,
+            ineligible_refund_mutation=ineligible_refund_mutation,
+            incorrect_refund_amount=incorrect_refund_amount,
             silent_failure_false_success=silent_failure,
             missed_action=missed_action,
             incorrect_completion=incorrect_completion,
             over_suppression=over_suppression,
+            legitimate_completion=legitimate_completion,
             claim_uncertain=is_uncertain,
             claims_refund_issued=claims_refund,
             claimed_amount=claimed_amt,
@@ -140,7 +190,10 @@ class FailureDetector:
                 "expected_refund_count": expected_refund_count,
                 "actual_refund_total": actual_refund_total,
                 "expected_refund_total": expected_refund_total,
-                "claimed_success": claims_refund
+                "requested_amount": requested_amount,
+                "claimed_success": claims_refund,
+                "refund_mutation_count": len(refund_mutations),
+                "duplicate_operation_ids": sorted(duplicate_operation_ids),
             }
         )
 

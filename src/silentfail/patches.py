@@ -98,7 +98,7 @@ class PatchedToolRegistry:
         if p_type == "control.refuse_all":
             self.raw.ledger.record_tool_request("issue_refund", {"order_id": order_id, "amount": amount, "control": "refuse_all"})
             res = {"status": "error", "message": "Policy refusal: all refund requests blocked"}
-            self.raw.ledger.record_tool_response(res)
+            self.raw.ledger.record_tool_response(res, tool="issue_refund")
             return res
 
         # 2. Control: blind_dedupe
@@ -106,7 +106,7 @@ class PatchedToolRegistry:
             if order_id in self._order_refunded_keys:
                 self.raw.ledger.record_tool_request("issue_refund", {"order_id": order_id, "amount": amount, "control": "blind_dedupe"})
                 res = {"status": "ok", "message": "Deduplicated repeat call on order"}
-                self.raw.ledger.record_tool_response(res)
+                self.raw.ledger.record_tool_response(res, tool="issue_refund")
                 return res
             self._order_refunded_keys.add(order_id)
             return self.raw.issue_refund(order_id, amount, idempotency_key=stable_key, operation_id=op_id)
