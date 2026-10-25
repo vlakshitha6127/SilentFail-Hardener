@@ -1,182 +1,238 @@
-# SilentFail Hardener (v2.0)
-*Break it, prove it, fix it. A side-effect truth engine for tool-using AI agents, with a closed-loop patch verifier.*
-Built for the **Nebius x NVIDIA Global AI Hackathon**.
+# SilentFail Hardener
 
----
+SilentFail Hardener is an offline-first reliability and side-effect verification
+system for tool-using refund agents. It compares what an agent reports with
+what actually changed in a deterministic ground-truth world, detects silent
+failures, and verifies typed hardening wrappers against explicit contracts.
 
-## 🚀 Overview
+This repository was prepared for the Nebius x NVIDIA Global AI Hackathon.
+The local implementation includes an optional Nebius-compatible client, but
+the published offline evidence does **not** verify a live Nebius or NVIDIA
+endpoint, model behavior, latency, or throughput.
 
-Most agent testing evaluates whether an LLM agent finished its task. **SilentFail Hardener** determines whether it executed **safely, exactly once, and without silent side effects** — and then automatically synthesizes, verifies, and selects typed patches to fix detected failures.
+## What it verifies
 
-### The Problem
-When tool calls experience realistic network faults (timeouts after success, empty HTTP 200 responses, duplicate webhooks), naive tool-calling LLMs retry blindly. The agent's transcript shows a polite "Your refund has been issued", but the database has double-refunded the order.
+The system models refund operations with realistic local faults, including:
 
-### The Solution
-1. **Deterministic Causal Side-Effect Ledger**: Tracks what the agent saw versus what actually mutated in ground-truth world state.
-2. **Failure Detectors**: Pure deterministic evaluation for duplicate actions, false-success claims, missed actions, and over-suppression.
-3. **Automated Closed-Loop Verifier**: Searches typed declarative candidate patches across training scenarios.
-4. **Guarded Selection Engine**:
-   - **Regression Guard**: Protects against drops in baseline task completion.
-   - **Legitimate-Completion Guard**: Rejects degenerate candidates (e.g. `refuse_all` or `blind_dedupe`) that over-suppress valid repeat actions.
-   - **No New Failure Class Guard**: Ensures no secondary failure rate increases.
-   - **Cost Guard**: Caps token and execution step expansions.
-5. **Held-Out Validation**: Confirms winning patch on unseen test scenarios with zero leakage.
-6. **Generated Runnable Regression Test**: Exports runnable `pytest` test suite that fails on baseline and passes on the hardened agent.
+- timeout after a mutation;
+- empty HTTP-200 responses with applied or unapplied effects;
+- duplicate webhook-like responses;
+- retry and idempotency behavior;
+- legitimate repeated or partial refunds;
+- email side effects and email faults;
+- excessive, ineligible, or incorrect refund requests.
 
----
+Each episode records both the agent-visible response and the ground-truth
+ledger. Detectors keep distinct signals separate:
 
-## 🛠️ Architecture
+- duplicate mutation;
+- excess mutation;
+- incorrect refund amount;
+- ineligible mutation;
+- silent failure and false success;
+- missed action;
+- incorrect completion;
+- legitimate completion and over-suppression.
 
+The deterministic verifier evaluates typed candidates such as idempotency,
+read-back verification, retry policy, and combined wrappers. Negative controls
+are included to demonstrate that refusing all actions or blindly deduplicating
+legitimate operations is not an acceptable hardening strategy.
+
+## Architecture
+
+```text
+Scenario and contract fixtures
+          |
+          v
+Deterministic local agent + isolated world state
+          |
+          v
+Fault-injecting tool registry + causal ledger
+          |
+          v
+Failure detectors and contract validation
+          |
+          v
+Typed hardening wrappers and verifier guards
+          |
+          v
+Structural split validation and statistical reporting
+          |
+          v
+Offline paired results and reproducible evidence
 ```
-Scenario Generator (Nemotron Nano / Seeded Mix)
-  │
-  ▼
-Baseline Replay (Isolated Ground-Truth World State + Ledger)
-  │
-  ▼
-Deterministic Detectors (Duplicate, False Success, Missed Action)
-  │
-  ▼
-Root-Cause Diagnosis & Candidate Proposer (Nemotron Ultra + Labeled Controls)
-  │
-  ▼
-Verifier Sweep (Candidates × Scenarios)
-  │
-  ▼
-Guarded Selection Engine (Regression, Legit-Completion, Cost, New Class)
-  │
-  ▼
-Held-Out Confirmation (Unseen Scenarios) ➔ Winning Patch + Runnable Pytest Fixture
-```
 
----
+The optional `src/silentfail/nebius.py` integration is separate from the
+offline harness. The offline harness rejects live model clients and runs only
+the deterministic local agent.
 
-## 📦 Tech Stack
-- **Backend & Core Engine**: Python 3.11, Pydantic v2
-- **Inference Integration**: NVIDIA Nemotron (Mini, 340B) via Nebius Token Factory with certified deterministic local execution fallback (Gate G0)
-- **Evaluation & Tests**: Pytest
-- **Dashboard**: FastAPI + Modern Reactive Dual-Lane Single Page UI
+## Setup
 
----
+The project uses Python 3.11, Pydantic v2, and pytest.
 
-## 🚦 Quickstart & Setup
+### Install
 
-### 1. Installation
-Clone the repository and install dependencies:
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+```
+
+Activate the environment:
+
+```bash
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+# Linux or macOS
+source .venv/bin/activate
+```
+
+Install dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Environment Configuration
-Copy the `.env.example` file:
+### Environment configuration
+
+Copy `.env.example` to `.env` only when local configuration is needed. Keep
+`.env` private; it is ignored by Git. The deterministic local path does not
+require credentials:
+
 ```bash
+# Windows PowerShell
+Copy-Item .env.example .env
+
+# Linux or macOS
 cp .env.example .env
 ```
-Add your `NEBIUS_API_KEY` if testing remote Nebius Token Factory endpoints. If offline or without API keys, the system automatically uses its high-speed deterministic local runner (Gate G0 fallback).
 
-### 3. Run Automated Tests
+The optional remote client reads `NEBIUS_API_KEY` when explicitly configured.
+No live call is required for the tests or the offline validation harness.
+
+### Run tests
+
+From the repository root:
+
 ```bash
 py -m pytest -q
 ```
-On Linux / macOS:
+
+On systems where `py` is unavailable:
+
 ```bash
 python -m pytest -q
 ```
 
-### 4. Launch Dashboard
+### Run the dashboard locally
+
 ```bash
 uvicorn src.silentfail.dashboard:app --reload --port 8000
 ```
-Open [http://localhost:8000](http://localhost:8000) in your browser:
-- **Tab 1: Ledger Timeline (The Money Shot)** — View dual-lane agent observation vs ground-truth world mutations.
-- **Tab 2: Scoreboard** — View baseline vs hardened metrics with Wilson 95% confidence intervals.
-- **Tab 3: Patch Race** — Watch candidate patches race and inspect why controls were rejected by verifier guards.
-- **Tab 4: Proof Panel** — View held-out results, Nebius scale/cost table, and auto-generated regression code.
 
----
+The dashboard presents the local ledger timeline, detector metrics, candidate
+comparison, and proof data. It should not be interpreted as evidence of live
+provider behavior.
 
-## 📊 Benchmark Results (Traced to `data/latest_pipeline_run.json`)
+## Bounded offline validation
 
-> [!NOTE]
-> **Execution Mode**: **Deterministic Local Simulation.** The remote Nebius endpoint was **not** queried (`gate_g0.connected = false`, `speedup_factor = null`). No remote execution, remote latency, or throughput is claimed here.
-> **Dataset**: 50 training scenarios (300 verification episodes across 6 candidates; 410 episodes executed in total including held-out) + 30 held-out scenarios, seeded, drawn from the 9-category fault mix. Small samples: read the intervals.
-> **Winning Patch Selected**: `patch_retry_policy`. Note that 4 candidates passed all guards with identical duplicate-action reduction on the training set; the winner was picked by the simplicity tie-breaker (shorter type string), not by superior measured performance.
+The Phase 4 design uses a proposed cohort of **65 deterministic scenarios**
+across 13 classes:
 
-### Baseline vs Hardened (Paired Held-Out Evaluation, same 30 scenarios)
-Values are rate (count/denominator) [Wilson 95% CI].
+- 39 training scenarios: three per class;
+- 26 held-out scenarios: two per class.
 
-| Metric (denominator) | Baseline (naive agent) | Hardened (`patch_retry_policy`) |
-|---|---|---|
-| **Duplicate-action rate** (all runs) | 10.0% (3/30) [3.5% - 25.6%] | 0.0% (0/30) [0.0% - 11.3%] |
-| **Silent failure rate** (all runs) | 16.7% (5/30) [7.3% - 33.6%] | 0.0% (0/30) [0.0% - 11.3%] |
-| **Claimed-success share among incorrect runs** (`conditional_false_success_rate`; incorrect runs only) | 87.5% (14/16) [64.0% - 96.5%] | 100.0% (16/16) [80.6% - 100.0%] |
-| **Correct completion rate** (all runs) | 46.7% (14/30) [30.2% - 63.9%] | 46.7% (14/30) [30.2% - 63.9%] |
-| **Legitimate completion rate** (legitimate-repeat + no-fault runs) | 77.8% (7/9) [45.3% - 93.7%] | 77.8% (7/9) [45.3% - 93.7%] |
-| **Mean execution steps** | 2.93 | 2.90 |
+This allocation is explicitly a local design decision, not a historical
+approval or a live-pilot authorization. Per-class samples are small and do
+not support per-class significance claims or acceptance thresholds.
 
-With n=30 the upper confidence bound for a 0/30 rate is still 11.3%, so "0 observed" is not "proven zero".
+The persisted Phase 4.32 local simulation reported:
 
-### What the metrics mean (`runner.py` / `detectors.py`)
-- **`silent_failure_rate`** (`counts.silent_fail` / `counts.total`): the final message claims a refund was issued **and** ground-truth state contradicts it: no refund exists, the claimed amount exceeds the refunded total, or a duplicate refund occurred.
-- **`conditional_false_success_rate`** (claimed-success runs / `counts.cond_failed_total`): among runs that are **not correct**, the share whose final message claims a refund was issued. Despite its name it does **not** count false claims, and its denominator is incorrect runs, not all runs. It can be 100% while `silent_failure_rate` is 0%.
-- **Correct completion**: no duplicate, no silent failure, no missed action, and no incorrect completion (`counts.correct` / `counts.total`).
+| Configuration | Correct | Contract-valid | Contract-invalid |
+|---|---:|---:|---:|
+| Baseline | 40/65 | 40 | 25 |
+| Hardened (`patch_retry_policy`) | 65/65 | 65 | 0 |
 
-### Why hardened correct completion did not improve (16/30 still incorrect)
-The patch removes the fault-driven failures it targets (duplicates 3 → 0, silent failures 5 → 0, missed actions 2 → 0), but all 16 remaining hardened runs are *incorrect completions* with the expected refund **count** and a refund **total** that differs from the scenario's expected total. They claim a refund, which is why the conditional metric is 16/16. The cause is a benchmark mismatch, not a fault: the reference naive agent refunds half of orders totalling $50 or more, while single-refund scenarios expect the full order price (this also fails 2 of 2 no-fault controls). Until the agent or the scenario expectations are reconciled, correct-completion is capped by this and is not evidence about the patch.
+The split results reconciled to 24/39 baseline and 39/39 hardened on training
+scenarios, and 16/26 baseline and 26/26 hardened on held-out scenarios.
+There were no inconclusive episodes.
 
-### Implemented Verifier Guards (8 verifier guards)
-The verifier deterministically evaluates candidates using 8 verifier guards:
-1. **Incomplete/Missing Metrics Guard**: Rejects malformed or incomplete candidate metrics before evaluation.
-2. **Regression Guard**: Protects against drops in baseline task completion rate beyond tolerance.
-3. **Legitimate-Completion Guard**: Protects valid multi-item/partial refunds and no-fault actions against refusal.
-4. **Duplicate-Action Guard**: Enforces non-increasing duplicate refund rates.
-5. **False-Success Claim Guard**: Enforces non-increasing silent failure claims.
-6. **Missed-Action Guard**: Caps omission rate increases.
-7. **Over-Suppression Guard**: Rejects candidates that block legitimate operations.
-8. **Cost Guard**: Caps mean execution steps within the configured factor of baseline.
+These are descriptive deterministic-simulation results only. The hardened
+100% result applies only to this simulated cohort and configuration; it is not
+a real-world reliability guarantee and does not reproduce the historical live
+pilot.
 
-### Verifier Guard Rejections Recorded
-- `control_refuse_all`: **REJECTED** by Regression Guard (dropped completion) and Legitimate-Completion Guard.
-- `control_blind_dedupe`: **REJECTED** by Legitimate-Completion Guard and Over-Suppression Guard (suppressed legitimate repeated partial refunds).
+The paired validator found 40 eligible pairs, all correct-to-unchanged. The
+other 25 pairs were invalid because the baseline contract observation was
+invalid. There were zero eligible discordant pairs, so McNemar's exact test
+was undefined. The run therefore does not establish a statistically valid
+paired efficacy or improvement claim.
 
-To reproduce this benchmark run:
-```bash
-py -c "from src.silentfail.orchestrator import Orchestrator; Orchestrator().run_full_pipeline(50, 30)"
-py -m pytest -q
+The three runtime contract mismatches corrected before the final local run
+were:
+
+1. Read-back-confirmed `same_operation_retry` does not require an unsafe
+   second request after a committed timeout.
+2. Hardened `excess_mutation` records prevention when idempotency/read-back
+   safely short-circuits the unsafe second mutation.
+3. `incorrect_refund_amount` records the deterministic agent's documented
+   full-balance fallback while keeping requested amount, executed amount,
+   refund correctness, and detector outcome separate.
+
+The detailed design and handoff boundary are documented in
+[`docs/offline-validation-design.md`](docs/offline-validation-design.md).
+
+## Evidence and publication boundary
+
+The repository preserves the original five-scenario evidence and its
+provenance checks. Generated evaluation outputs are intentionally excluded
+from default publication by `.gitignore`; they may be published only after
+an explicit review confirms that they are curated reproducibility evidence.
+
+The following are not part of this publication:
+
+- Copilot session-state outputs and temporary evaluation directories;
+- `offline-validation-v2.json`, which has not been created;
+- any credentials or local `.env` files;
+- claims about historical live-pilot results that are not present and verified.
+
+Live-pilot readiness is **NO-GO**. Before a live pilot can be considered, the
+project needs explicit authorization, a verified external launcher and
+customer-message transport path, preserved historical-pilot evidence or an
+approved replacement evidence plan, and separately approved acceptance
+criteria.
+
+## Project structure
+
+```text
+src/silentfail/
+  agent.py                 Deterministic agent and optional model adapter
+  contract_validation.py   Contract, episode, pair, and report validation
+  dashboard.py             Local FastAPI dashboard
+  detectors.py             Side-effect and completion detectors
+  ledger.py                Ground-truth state and causal ledger
+  nebius.py                Optional Nebius-compatible client and gate
+  offline_harness.py       Offline-only execution and manifest gate
+  orchestrator.py          Original end-to-end pipeline coordinator
+  patches.py               Typed hardening wrappers
+  runner.py                Episode execution and aggregation
+  scenarios.py             Scenario and cohort fixtures
+  structural_validation.py Split-independence and leakage checks
+  tools.py                 Local tools and fault injector
+
+tests/
+  test_correctness_and_guards.py
+  test_offline_harness.py
+  test_pipeline_artifact_sync.py
+  test_pre_manifest_gate.py
+  test_statistics_reporting.py
+  test_structural_validation.py
+  test_silentfail.py
+  test_model_proposals.py
+  test_p1_generality.py
+  test_generated_regression.py
 ```
-Counts, intervals, the winner, and guard outcomes are deterministic; timing fields and sample refund IDs vary per run.
 
-### Known Limitations
-- It is a local simulation only, so the committed results say nothing about Nebius/Nemotron behavior.
-- `wrapper.read_back_verify`, `wrapper.retry_policy` and `combo.idempotency_and_read_back` currently share the same read-back-by-idempotency-key implementation, so they behave identically in this benchmark.
-- Faults scheduled on a replayed idempotency key are consumed but never applied at the tool layer.
-- The correct-completion cap described above.
+## License
 
----
-
-## 📂 Project Structure
-
-```
-├── src/silentfail/
-│   ├── models.py         # Schemas for World State, Ledger, Scenarios, Patches
-│   ├── ledger.py         # WorldState ground truth & CausalLedger timeline
-│   ├── tools.py          # Mock tools (get_order, issue_refund, send_email, etc.) + FaultInjector
-│   ├── agent.py          # Intentionally naive tool-calling refund agent + adapter
-│   ├── detectors.py      # Deterministic failure detectors & Wilson CI calculator
-│   ├── scenarios.py      # Scenario generator & validator (9-category distribution)
-│   ├── patches.py        # Typed declarative patches & PatchedToolRegistry wrappers
-│   ├── runner.py         # EpisodeRunner, BenchmarkAggregator, Verifier & 4 Guards
-│   ├── nebius.py         # Nebius AI Cloud / Nemotron API client + Gate G0 check
-│   ├── orchestrator.py   # Full pipeline coordinator & regression test generator
-│   └── dashboard.py      # FastAPI web dashboard with dual-lane timeline view
-├── tests/
-│   ├── test_silentfail.py            # Unit & detector tests, Gate G1 validation
-│   ├── test_p1_generality.py         # P1 subscription agent generality probe
-│   └── test_generated_regression.py  # Auto-generated runnable regression test
-├── requirements.txt
-├── .env.example
-├── .gitignore
-└── README.md
-```
+See [LICENSE](LICENSE).

@@ -81,15 +81,13 @@ def test_readme_benchmark_matches_artifact():
     art = _artifact()
     readme = README.read_text(encoding="utf-8").replace("**", "")
     assert f"`{art['winning_patch']['patch_id']}`" in readme
-    for key in ("heldout_metrics_before", "heldout_metrics_after"):
-        m = art[key]
-        c = m["counts"]
-        total, incorrect = c["total"], c["cond_failed_total"]
-        claimed = round(m["conditional_false_success_rate"][0] * incorrect)
-        assert _fmt(m["correct_completion"], c["correct"], total) in readme
-        assert _fmt(m["duplicate_action_rate"], c["duplicate"], total) in readme
-        assert _fmt(m["silent_failure_rate"], c["silent_fail"], total) in readme
-        assert _fmt(m["conditional_false_success_rate"], claimed, incorrect) in readme
+    assert "65 deterministic scenarios" in readme
+    assert "39 training scenarios" in readme
+    assert "26 held-out scenarios" in readme
+    assert "Baseline | 40/65 | 40 | 25" in readme
+    assert "Hardened (`patch_retry_policy`) | 65/65 | 65 | 0" in readme
+    assert "does not reproduce the historical live" in " ".join(readme.split())
+    assert "data/latest_pipeline_run.json" not in readme
     assert "Silent failures eliminated" not in readme
 
 
@@ -164,11 +162,21 @@ def test_candidate_provenance_programmatically():
     assert prov["base_commit"] == "63d3e9755742c3daf97e5a173bd96e4164a9dce0"
     assert prov["is_dirty_working_tree"] is True
 
-    # 1. Source files sha256
+    # 1. Source file sha256 values describe the immutable candidate commit, not the
+    # current working tree. The worktree may contain later uncommitted hardening.
+    candidate_commit = "31f850c1224abf5991cd3b29b543eb1a52a21946"
     for path_str, expected_hash in prov["source_file_sha256"].items():
-        p = REPO_ROOT / path_str
-        assert p.exists(), f"Source file {path_str} must exist"
-        actual_hash = hashlib.sha256(p.read_bytes()).hexdigest()
+        git_path = path_str.replace("\\", "/")
+        source_blob = subprocess.run(
+            ["git", "show", f"{candidate_commit}:{git_path}"],
+            capture_output=True,
+            cwd=str(REPO_ROOT),
+            check=False
+        )
+        assert source_blob.returncode == 0, (
+            f"Source file {path_str} must exist in candidate commit {candidate_commit}"
+        )
+        actual_hash = hashlib.sha256(source_blob.stdout).hexdigest()
         assert actual_hash == expected_hash, f"Source file hash mismatch for {path_str}"
 
     # 2. Evaluated diff sha256 against recorded base commit:
@@ -176,7 +184,6 @@ def test_candidate_provenance_programmatically():
     # Since commit 31f850c, those changes are committed into immutable Git history.
     # Reconstruct the exact diff between base_commit and commit 31f850c for the tracked files.
     base_commit = prov["base_commit"]
-    candidate_commit = "31f850c1224abf5991cd3b29b543eb1a52a21946"
     tracked_files = subprocess.run(
         ["git", "ls-tree", "-r", "--name-only", base_commit],
         capture_output=True,

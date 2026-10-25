@@ -78,11 +78,12 @@ class CausalLedger:
         self._seq += 1
         return mut_seq
 
-    def record_tool_response(self, observed: Dict[str, Any], fault: Optional[str] = None) -> int:
+    def record_tool_response(self, observed: Dict[str, Any], fault: Optional[str] = None, tool: Optional[str] = None) -> int:
         resp_seq = self._seq
         self.events.append(LedgerEvent(
             seq=self._seq,
             type="tool_response_to_agent",
+            tool=tool,
             observed=copy.deepcopy(observed),
             fault=fault
         ))

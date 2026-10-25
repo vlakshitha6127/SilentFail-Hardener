@@ -89,10 +89,8 @@ class BenchmarkAggregator:
       flags a final message that claims a refund was issued while the ground-truth state has no
       refund, claims more than was refunded, or claims success after a duplicate refund.
     - conditional_false_success_rate: among runs that are NOT correct (counts.cond_failed_total),
-      the share whose final message claims a refund was issued (claims_refund_issued). Despite the
-      name it is NOT a count of false claims: a wrong-amount run whose message accurately states the
-      amount refunded still counts. Its denominator is incorrect runs, so it is not comparable to
-      silent_failure_rate (denominator: all runs) and can be 1.0 while silent_failure_rate is 0.0.
+      the share whose final message claims a refund was issued (claims_refund_issued). This is
+      intentionally a claim rate, not a proof that the claim was false.
     - legitimate_completion_rate: correct runs among legitimate_repeat + no_fault_control scenarios.
     """
     @classmethod
@@ -103,6 +101,9 @@ class BenchmarkAggregator:
 
         correct_count = sum(1 for r in results if r["is_correct"])
         duplicate_count = sum(1 for r in results if r["detection"].duplicate_action)
+        excess_mutation_count = sum(1 for r in results if r["detection"].excess_mutation)
+        ineligible_mutation_count = sum(1 for r in results if r["detection"].ineligible_refund_mutation)
+        incorrect_amount_count = sum(1 for r in results if r["detection"].incorrect_refund_amount)
         silent_fail_count = sum(1 for r in results if r["detection"].silent_failure_false_success)
         missed_count = sum(1 for r in results if r["detection"].missed_action)
         incorrect_count = sum(1 for r in results if r["detection"].incorrect_completion)
@@ -130,6 +131,9 @@ class BenchmarkAggregator:
             "total_runs": total,
             "correct_completion": calculate_wilson_score_interval(correct_count, total),
             "duplicate_action_rate": calculate_wilson_score_interval(duplicate_count, total),
+            "excess_mutation_rate": calculate_wilson_score_interval(excess_mutation_count, total),
+            "ineligible_refund_mutation_rate": calculate_wilson_score_interval(ineligible_mutation_count, total),
+            "incorrect_refund_amount_rate": calculate_wilson_score_interval(incorrect_amount_count, total),
             "silent_failure_rate": calculate_wilson_score_interval(silent_fail_count, total),
             "conditional_false_success_rate": calculate_wilson_score_interval(cond_false_success_count, cond_total) if cond_total > 0 else (0.0, 0.0, 0.0),
             "legitimate_completion_rate": calculate_wilson_score_interval(legit_correct_count, legit_total) if legit_total > 0 else (0.0, 0.0, 0.0),
@@ -142,6 +146,9 @@ class BenchmarkAggregator:
             "counts": {
                 "correct": correct_count,
                 "duplicate": duplicate_count,
+                "excess_mutation": excess_mutation_count,
+                "ineligible_refund_mutation": ineligible_mutation_count,
+                "incorrect_refund_amount": incorrect_amount_count,
                 "silent_fail": silent_fail_count,
                 "total": total,
                 "cond_failed_total": cond_total
@@ -247,6 +254,7 @@ class VerifierAndSelector:
         race_summary = {}
         best_candidate: Optional[PatchSpec] = None
         best_target_reduction = -1.0
+        best_secondary: Optional[Tuple[float, float, float, str]] = None
 
         base_dup_rate = baseline_metrics["duplicate_action_rate"][0]
 
@@ -271,12 +279,23 @@ class VerifierAndSelector:
             }
 
             if is_eligible:
-                if reduction > best_target_reduction:
+                # Primary: measured duplicate reduction. Ties use measured correctness,
+                # legitimate completion, then lower mean steps; patch_id is only the
+                # final reproducibility key, never evidence of safety.
+                secondary = (
+                    metrics["correct_completion"][0],
+                    metrics["legitimate_completion_rate"][0],
+                    -metrics["mean_steps"],
+                    p_id,
+                )
+                if reduction > best_target_reduction + 0.001:
                     best_target_reduction = reduction
                     best_candidate = spec_map[p_id]
-                elif abs(reduction - best_target_reduction) < 0.001 and best_candidate:
-                    # Simplicity tie-breaker
-                    if len(spec_map[p_id].type) < len(best_candidate.type):
-                        best_candidate = spec_map[p_id]
+                    best_secondary = secondary
+                elif abs(reduction - best_target_reduction) < 0.001 and (
+                    best_secondary is None or secondary > best_secondary
+                ):
+                    best_candidate = spec_map[p_id]
+                    best_secondary = secondary
 
         return best_candidate, race_summary
