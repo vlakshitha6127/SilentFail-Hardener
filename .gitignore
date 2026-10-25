@@ -33,6 +33,7 @@ temp/
 runs/
 outputs/
 evaluation_outputs/
+data/demo/
 
 # Local session and tool state
 .copilot/

@@ -13,8 +13,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import json
+import os
 from pathlib import Path
 from src.silentfail.orchestrator import Orchestrator
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEMO_OUTPUT_DIR = Path(os.getenv("SILENTFAIL_DEMO_OUTPUT_DIR", str(REPO_ROOT / "data" / "demo")))
+DEMO_TESTS_DIR = DEMO_OUTPUT_DIR / "tests"
 
 app = FastAPI(title="SilentFail Hardener Dashboard")
 
@@ -26,7 +31,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-orchestrator = Orchestrator()
+orchestrator = Orchestrator(data_dir=str(DEMO_OUTPUT_DIR), tests_dir=str(DEMO_TESTS_DIR))
+
+
+def provider_status_label(gate_g0: dict, *, configured_live: bool = False) -> str:
+    """Describe provider state without implying live success before a probe."""
+    status = gate_g0.get("status")
+    if status == "connected" and gate_g0.get("connected") is True:
+        return "Live provider verified (model response received)"
+    if status == "live_provider_error":
+        return "Configured live provider failed; deterministic local simulation"
+    if status == "live_provider_unavailable":
+        return "Live provider configured but unavailable; deterministic local simulation"
+    if status == "local_simulation":
+        return "Deterministic local simulation"
+    if configured_live:
+        return "Live provider configured; not verified"
+    return "Provider status: not probed"
+
+
+def _dashboard_state() -> dict:
+    state_file = orchestrator.data_dir / "latest_pipeline_run.json"
+    if state_file.exists():
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    else:
+        state = orchestrator.pipeline_state
+    state = dict(state)
+    state["provider_status"] = provider_status_label(
+        state.get("gate_g0", {}),
+        configured_live=bool(
+            orchestrator.nebius_client.api_key
+            and orchestrator.nebius_client.api_key != "your_nebius_or_nvidia_api_key_here"
+        ),
+    )
+    return state
 
 DASHBOARD_HTML = """
 <!DOCTYPE html>
@@ -99,7 +138,7 @@ DASHBOARD_HTML = """
             <p style="color: var(--muted); font-size: 0.95rem; margin-top: 4px;">Side-effect truth engine for tool-using AI agents & closed-loop patch verifier</p>
         </div>
         <div style="display: flex; gap: 12px; align-items: center;">
-            <span id="backend-status" class="badge">Nebius / NVIDIA Gate G0: Ready</span>
+            <span id="backend-status" class="badge">Provider status: not probed</span>
             <button class="btn-run" onclick="triggerPipeline()">Re-Run Hardening Pipeline</button>
         </div>
     </div>
@@ -219,9 +258,8 @@ DASHBOARD_HTML = """
 
         function renderUI(data) {
             // Gate G0
-            if (data.gate_g0) {
-                document.getElementById('backend-status').innerText = data.gate_g0.status === 'connected' ? 
-                    `Nebius Nemotron: Connected (${data.gate_g0.latency_ms}ms)` : `Nebius Local Runner: Deterministic Fallback`;
+            if (data.provider_status) {
+                document.getElementById('backend-status').innerText = data.provider_status;
             }
 
             // 1. Dual Lane Timeline
@@ -325,12 +363,9 @@ def get_dashboard():
 
 @app.get("/api/state")
 def get_pipeline_state():
-    state_file = Path("data/latest_pipeline_run.json")
-    if state_file.exists():
-        with open(state_file, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return orchestrator.pipeline_state
+    return _dashboard_state()
 
 @app.post("/api/run")
 def trigger_pipeline():
-    return orchestrator.run_full_pipeline(train_count=50, held_out_count=30)
+    orchestrator.run_full_pipeline(train_count=50, held_out_count=30)
+    return _dashboard_state()
