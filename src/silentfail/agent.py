@@ -292,6 +292,22 @@ class NaiveRefundAgent:
         tokens_out = 0
         tool_call_count = 0
         step_count = 0
+        registry = getattr(tools, "raw", tools)
+        world_state = getattr(registry, "world_state", None)
+        initial_refund_ids = set(world_state.refunds) if world_state is not None else set()
+        refund_operations: Dict[str, float] = {}
+
+        def append_confirmation_event() -> None:
+            nonlocal step_count, tool_call_count
+            confirmation = self._ensure_refund_confirmation(
+                user_message, tools, initial_refund_ids, refund_operations
+            )
+            if confirmation is None:
+                return
+            step_count += 1
+            tool_call_count += 1
+            transcript.append({"step": step_count, "action": "call send_email", "args": confirmation["args"]})
+            transcript.append({"step": step_count, "observation": confirmation["response"]})
 
         max_steps = config.get("max_steps", 6)
         for _ in range(max_steps):
@@ -317,6 +333,7 @@ class NaiveRefundAgent:
             transcript.append({"step": step_count, "message": msg.model_dump()})
 
             if not msg.tool_calls:
+                append_confirmation_event()
                 return AgentResult(
                     final_message=msg.content or "",
                     transcript=transcript,
@@ -340,6 +357,7 @@ class NaiveRefundAgent:
                             "message": "operation_id is required for issue_refund to guarantee idempotency and avoid duplicate charges."
                         }
                     else:
+                        refund_operations[str(op_id)] = float(fn_args.get("amount", 0))
                         tool_res = tools.issue_refund(
                             order_id=str(fn_args.get("order_id")),
                             amount=float(fn_args.get("amount", 0)),
@@ -357,9 +375,56 @@ class NaiveRefundAgent:
                 })
                 transcript.append({"step": step_count, "tool_response": tool_res})
 
+        append_confirmation_event()
         return AgentResult(
             final_message=messages[-1].get("content", "") if isinstance(messages[-1], dict) else getattr(messages[-1], "content", ""),
             transcript=transcript,
             terminated="max_steps",
             cost=ExecutionCost(tokens_in=tokens_in, tokens_out=tokens_out, tool_calls=tool_call_count, steps=step_count)
         )
+
+    @staticmethod
+    def _ensure_refund_confirmation(
+        user_message: str,
+        tools: ToolRegistry,
+        initial_refund_ids: set,
+        refund_operations: Dict[str, float],
+    ) -> Optional[Dict[str, Any]]:
+        """Send one confirmation when a committed refund lacks one already."""
+        order_match = re.search(r"order\s+(\d+)", user_message, re.IGNORECASE)
+        if not order_match:
+            return None
+
+        order_id = order_match.group(1)
+        registry = getattr(tools, "raw", tools)
+        world_state = getattr(registry, "world_state", None)
+        if world_state is None:
+            return None
+
+        refunds = [
+            refund for refund in world_state.refunds.values()
+            if refund.order_id == str(order_id) and refund.id not in initial_refund_ids
+        ]
+        if not refunds:
+            return None
+
+        subject = f"Refund for Order {order_id}"
+        if any(email.subject == subject for email in world_state.emails):
+            return None
+
+        operation_refunds = [
+            refund for refund in refunds
+            if refund.idempotency_key
+            and refund.idempotency_key.removeprefix("idem_") in refund_operations
+        ]
+        if len(operation_refunds) != 1:
+            return None
+
+        amount = operation_refunds[0].amount
+        args = {
+            "to": "customer@example.com",
+            "subject": subject,
+            "body": f"Your refund of ${amount:.2f} has been processed."
+        }
+        response = tools.send_email(**args)
+        return {"args": args, "response": response}

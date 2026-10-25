@@ -574,6 +574,7 @@ def test_duplicate_retry_regression_timeout_after_success():
     assert hardened["detection"].duplicate_action is False
     assert hardened["record"].final_state["refund_count"] == 1
     assert hardened["record"].final_state["refund_total"] == 40.0
+    assert hardened["record"].final_state["email_count"] == 1
     assert hardened["is_correct"] is True
 
     mutations_hardened = [e for e in hardened["record"].events if e.type == "world_mutation" and e.effect == "refund_created"]
@@ -819,4 +820,3 @@ def test_sanitized_error_metadata():
     assert metadata["model_outcome"] == "request_error"
     assert fake_key not in metadata["error"]
     assert "[REDACTED" in metadata["error"]
-
