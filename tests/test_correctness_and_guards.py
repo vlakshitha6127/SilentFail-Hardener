@@ -434,6 +434,151 @@ def test_missing_operation_id_in_llm_tool_call_path():
     assert "operation_id is required" in tool_responses[0]["message"]
 
 
+def test_live_agent_timeout_recovery_sends_one_confirmation():
+    """A committed timeout recovery sends one email after exactly one refund mutation."""
+    class ToolCall:
+        def __init__(self, call_id, name, arguments):
+            self.id = call_id
+            self.function = type("Function", (), {"name": name, "arguments": arguments})()
+
+    class Message:
+        def __init__(self, tool_calls=None, content=None):
+            self.tool_calls = tool_calls or []
+            self.content = content
+
+        def model_dump(self):
+            return {"role": "assistant", "content": self.content, "tool_calls": []}
+
+    class Response:
+        def __init__(self, message):
+            self.choices = [type("Choice", (), {"message": message})()]
+            self.usage = None
+
+    class ScriptedClient:
+        def __init__(self, responses):
+            self.responses = iter(responses)
+
+            class Completions:
+                def __init__(inner_self):
+                    inner_self.create = self.create
+
+            self.chat = type("Chat", (), {"completions": Completions()})()
+
+        def create(self, **kwargs):
+            return next(self.responses)
+
+    ws = WorldState({"orders": [{"id": "9101", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]})
+    ledger = CausalLedger(scenario_id="live_timeout_recovery")
+    raw_tools = ToolRegistry(
+        ws,
+        ledger,
+        FaultInjector([FaultConfig(tool="issue_refund", call_index=0, type="timeout_after_success")]),
+    )
+    patch = PatchSpec(
+        patch_id="patch_retry_policy",
+        name="State-Checked Retry Policy Wrapper",
+        type="wrapper.retry_policy",
+        description="Verify committed mutations before retrying.",
+    )
+    tools = PatchedToolRegistry(raw_tools, patch=patch)
+    responses = [
+        Response(Message([ToolCall("get", "get_order", '{"order_id": "9101"}')])),
+        Response(Message([ToolCall("refund-1", "issue_refund", '{"order_id": "9101", "amount": 40.0, "operation_id": "op_9101"}')])),
+        Response(Message([ToolCall("refund-2", "issue_refund", '{"order_id": "9101", "amount": 40.0, "operation_id": "op_9101"}')])),
+        Response(Message(content="Refund completed.")),
+    ]
+
+    result = NaiveRefundAgent(model_client=ScriptedClient(responses), model_name="test-model").run(
+        "Please refund $40 for order 9101.",
+        tools,
+        config={"max_steps": 4},
+    )
+
+    mutations = [event for event in ledger.events if event.type == "world_mutation" and event.effect == "refund_created"]
+    assert result.terminated == "completed"
+    assert ws.get_summary()["refund_count"] == 1
+    assert ws.get_summary()["refund_total"] == 40.0
+    assert len(mutations) == 1
+    assert ws.get_summary()["email_count"] == 1
+    email_actions = [entry for entry in result.transcript if entry.get("action") == "call send_email"]
+    email_observations = [entry for entry in result.transcript if "observation" in entry and entry["observation"].get("email_id")]
+    assert len(email_actions) == 1
+    assert len(email_observations) == 1
+    assert result.cost.tool_calls == 4
+    assert result.cost.steps == 5
+
+
+def test_live_agent_does_not_duplicate_existing_confirmation():
+    """A model-sent confirmation prevents the deterministic post-refund send."""
+    class ToolCall:
+        def __init__(self, call_id, name, arguments):
+            self.id = call_id
+            self.function = type("Function", (), {"name": name, "arguments": arguments})()
+
+    class Message:
+        def __init__(self, tool_calls=None, content=None):
+            self.tool_calls = tool_calls or []
+            self.content = content
+
+        def model_dump(self):
+            return {"role": "assistant", "content": self.content, "tool_calls": []}
+
+    class Response:
+        def __init__(self, message):
+            self.choices = [type("Choice", (), {"message": message})()]
+            self.usage = None
+
+    class ScriptedClient:
+        def __init__(self, responses):
+            self.responses = iter(responses)
+
+            class Completions:
+                def __init__(inner_self):
+                    inner_self.create = self.create
+
+            self.chat = type("Chat", (), {"completions": Completions()})()
+
+        def create(self, **kwargs):
+            return next(self.responses)
+
+    ws = WorldState({"orders": [{"id": "9102", "status": "delivered", "total": 100.0, "refunded_amount": 0.0}]})
+    ledger = CausalLedger(scenario_id="live_existing_confirmation")
+    raw_tools = ToolRegistry(ws, ledger)
+    tools = PatchedToolRegistry(
+        raw_tools,
+        patch=PatchSpec(
+            patch_id="patch_idempotency_key",
+            name="Idempotency Key",
+            type="wrapper.idempotency_key",
+            description="Stable operation keys.",
+        ),
+    )
+    responses = [
+        Response(Message([ToolCall("get", "get_order", '{"order_id": "9102"}')])),
+        Response(Message([ToolCall("refund", "issue_refund", '{"order_id": "9102", "amount": 40.0, "operation_id": "op_9102"}')])),
+        Response(Message([ToolCall("email", "send_email", '{"to": "customer@example.com", "subject": "Refund for Order 9102", "body": "Your refund has been processed."}')])),
+        Response(Message(content="Refund completed.")),
+    ]
+
+    result = NaiveRefundAgent(model_client=ScriptedClient(responses), model_name="test-model").run(
+        "Please refund $40 for order 9102.",
+        tools,
+        config={"max_steps": 4},
+    )
+
+    assert result.terminated == "completed"
+    assert ws.get_summary()["refund_count"] == 1
+    assert ws.get_summary()["refund_total"] == 40.0
+    assert ws.get_summary()["email_count"] == 1
+    email_requests = [
+        event for event in ledger.events
+        if event.type == "tool_request" and event.tool == "send_email"
+    ]
+    assert len(email_requests) == 1
+    assert result.cost.tool_calls == 3
+    assert result.cost.steps == 4
+
+
 IDEMPOTENT_PATCH_SPECS = [
     ("patch_idempotency_key", "wrapper.idempotency_key"),
     ("patch_read_back_verify", "wrapper.read_back_verify"),
@@ -728,4 +873,3 @@ def test_legitimate_successful_completion_and_error_recovery():
     assert "error" in res_invalid
     assert ws.orders["8005"].refunded_amount == 30.0
     assert len(ws.refunds) == 1
-
